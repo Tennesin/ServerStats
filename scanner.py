@@ -18,7 +18,7 @@ from config import (
     ADMIN_ROLES, AUDIT_ENABLED, AUDIT_MAX_ENTRIES, AUDIT_RETENTION_DAYS, AUDIT_SKIP_ACTIONS,
     CONCURRENCY, DATE_FMT, EXCLUDE_FILE, GUILD_START_DATES, IGNORED_CHATS,
     MIN_START_DATE, PROGRESS_INTERVAL, REACTION_MAX_REQUESTS, REACTION_MAX_USERS, SPAM_FILTER, TZ,
-    fmt_duration, fmt_list, fmt_num, log, parse_date,
+    fmt_duration, fmt_list, fmt_num, log, parse_date, MERGE_USERS, IGNORE_USERS
 )
 from emoji_utils import normalize_unicode, parse_emoji
 
@@ -268,6 +268,58 @@ class ExcludeRules:
         all_labels = set(self.names.values()) | set(self.ids.values())
         return sorted(all_labels - self.hit, key=str.casefold)
 
+class IdentityRules:
+    """Игнорируемые аккаунты и слияние аккаунтов для одного сервера."""
+
+    def __init__(self, ignored=frozenset(), aliases=None):
+        self.ignored = frozenset(ignored)
+        self.aliases = dict(aliases or {})      # ID второго аккаунта -> ID главного
+
+    def skip(self, raw_id: int) -> bool:
+        return raw_id in self.ignored
+
+    def canon(self, raw_id: int) -> int:
+        return self.aliases.get(raw_id, raw_id)
+
+NO_IDENTITY = IdentityRules()
+
+def build_identity(guild_id: int) -> IdentityRules:
+    ignored: set[int] = set()
+    for item in IGNORE_USERS:
+        try:
+            if isinstance(item, (tuple, list)):
+                uid = int(item[0])
+                gid = int(item[1]) if len(item) > 1 and item[1] is not None else None
+            else:
+                uid, gid = int(item), None
+        except (TypeError, ValueError, IndexError):
+            log.warning("IGNORE_USERS: запись %r пропущена (неверный формат)", item)
+            continue
+        if gid is None or gid == guild_id:
+            ignored.add(uid)
+
+    parent: dict[int, int] = {}
+
+    def find(x: int) -> int:
+        while parent.get(x, x) != x:
+            x = parent[x]
+        return x
+
+    for item in MERGE_USERS:
+        try:
+            a, b = int(item[0]), int(item[1])
+            gid = int(item[2]) if len(item) > 2 and item[2] is not None else None
+        except (TypeError, ValueError, IndexError):
+            log.warning("MERGE_USERS: запись %r пропущена (неверный формат)", item)
+            continue
+        if gid is not None and gid != guild_id:
+            continue
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra          # главным остаётся первый указанный
+
+    return IdentityRules(ignored, {x: find(x) for x in parent})
+
 def load_store() -> dict:
     try:
         with open(EXCLUDE_FILE, "r", encoding="utf-8") as f:
@@ -427,7 +479,7 @@ async def collect_staff(guild: discord.Guild, state: ScanState) -> StaffInfo:
     info.unmatched_roles = [label for key, label in wanted.items() if key not in hit]
 
     for m in guild.members:
-        if m.bot:
+        if m.bot or ident.skip(m.id):
             continue
         roles = [r.name for r in m.roles if r.id in admin_roles]
         if m.id == guild.owner_id:
@@ -436,17 +488,25 @@ async def collect_staff(guild: discord.Guild, state: ScanState) -> StaffInfo:
             kind = "admin"
         else:
             continue
-        info.members[m.id] = StaffMember(m.display_name, m.name, kind, roles)
+        key = ident.canon(m.id)
+        old = info.members.get(key)
+        if old is None:
+            info.members[key] = StaffMember(m.display_name, m.name, kind, roles)
+        else:                                   # второй аккаунт того же человека
+            old.roles = sorted(set(old.roles) | set(roles))
+            if kind == "owner":
+                old.kind = "owner"
 
     # Владельца может не быть в кэше — докачиваем отдельно.
-    if guild.owner_id and guild.owner_id not in info.members:
+    owner_key = ident.canon(guild.owner_id) if guild.owner_id else None
+    if guild.owner_id and not ident.skip(guild.owner_id) and owner_key not in info.members:
         try:
             om = await guild.fetch_member(guild.owner_id)
-            info.members[om.id] = StaffMember(
+            info.members[owner_key] = StaffMember(
                 om.display_name, om.name, "owner",
                 [r.name for r in om.roles if r.id in admin_roles])
         except discord.HTTPException:
-            info.members[guild.owner_id] = StaffMember(str(guild.owner_id), "", "owner", [])
+            info.members[owner_key] = StaffMember(str(guild.owner_id), "", "owner", [])
 
     if guild.member_count and len(guild.members) < guild.member_count:
         info.partial = True
@@ -521,7 +581,8 @@ def reaction_key(emoji):
 
 async def collect_reactions(m: discord.Message, uid: int, target: ScanResult, main: ScanResult,
                             state: ScanState, params: ScanParams, own_emoji_ids,
-                            spam_rules: Optional[dict] = None):
+                            spam_rules: Optional[dict] = None,
+                            ident: IdentityRules = NO_IDENTITY):
     """Реакции под одним сообщением (автор uid уже прошёл общие фильтры).
     counts — берём только счётчики; full — читаем, кто поставил, и отсеиваем ботов и самореакции.
     Реакции из ручного антиспам-окна (по времени сообщения) пропускаются."""
@@ -561,14 +622,17 @@ async def collect_reactions(m: discord.Message, uid: int, target: ScanResult, ma
                         fetched += 1
                         if state.cancelled:
                             break
-                        if user.bot or user.id == uid:
+                        if ident.skip(user.id):
+                            continue
+                        giver = ident.canon(user.id)
+                        if user.bot or giver == uid:
                             target.reaction_self_or_bot += 1
                             continue
                         target.reaction_recv[(uid, key)] += 1
-                        target.reaction_given[(user.id, key)] += 1
-                        target.reaction_pairs[(user.id, uid)] += 1
-                        main.names.setdefault(user.id, user.display_name)
-                        main.usernames.setdefault(user.id, user.name)
+                        target.reaction_given[(giver, key)] += 1
+                        target.reaction_pairs[(giver, uid)] += 1
+                        main.names.setdefault(giver, user.display_name)
+                        main.usernames.setdefault(giver, user.name)
                         got_any = True
                 except discord.HTTPException as e:
                     state.reaction_errors += 1
@@ -614,9 +678,10 @@ def _reaction_finish(main: ScanResult, state: ScanState, params: ScanParams):
 # ---------- Чтение истории ----------
 
 async def scan_channels(channels, params: ScanParams, state: ScanState,
-                        own_emoji_ids=frozenset(), spam_rules: Optional[dict] = None) -> ScanResult:
+                        own_emoji_ids=frozenset(), spam_rules: Optional[dict] = None,
+                        ident: IdentityRules = NO_IDENTITY) -> ScanResult:
     start_dt, end_dt = period_bounds(params)
-    user_id = params.user.id if params.user else None
+    user_id = ident.canon(params.user.id) if params.user else None
 
     main = ScanResult()
     main.reaction_mode = params.reactions
@@ -648,12 +713,14 @@ async def scan_channels(channels, params: ScanParams, state: ScanState,
                     author = m.author
                     if author.bot or m.type not in COUNTED_TYPES:
                         continue
-                    if user_id and author.id != user_id:
+                    if ident.skip(author.id):
+                        continue
+                    uid = ident.canon(author.id)
+                    if user_id and uid != user_id:
                         continue
                     local = m.created_at.astimezone(TZ)
                     day = local.date()
                     target = prev if (prev is not None and day < params.start_date) else main
-                    uid = author.id
                     target.user_day[(uid, day)] += 1
                     target.user_channel[(uid, ch.id)] += 1
                     target.heat[(local.weekday(), local.hour)] += 1
@@ -665,23 +732,27 @@ async def scan_channels(channels, params: ScanParams, state: ScanState,
                         ref = m.reference.resolved if m.reference else None
                         if isinstance(ref, discord.Message):
                             dst = ref.author
-                            reply_dst = dst.id
-                            if dst.bot or dst.id == uid:
+                            dst_id = ident.canon(dst.id)
+                            reply_dst = dst_id
+                            if ident.skip(dst.id):
+                                pass
+                            elif dst.bot or dst_id == uid:
                                 target.reply_self_or_bot += 1
                             else:
-                                target.reply_pairs[(uid, dst.id)] += 1
-                                main.names.setdefault(dst.id, dst.display_name)
-                                main.usernames.setdefault(dst.id, dst.name)
+                                target.reply_pairs[(uid, dst_id)] += 1
+                                main.names.setdefault(dst_id, dst.display_name)
+                                main.usernames.setdefault(dst_id, dst.name)
                         else:
                             target.reply_unresolved += 1
 
                     # Теги конкретных людей. Роли, @everyone и @here в m.mentions не попадают.
                     for u in m.mentions:
-                        if u.bot or u.id == uid or u.id == reply_dst:
+                        u_id = ident.canon(u.id)
+                        if u.bot or ident.skip(u.id) or u_id == uid or u_id == reply_dst:
                             continue
-                        target.mention_pairs[(uid, u.id)] += 1
-                        main.names.setdefault(u.id, u.display_name)
-                        main.usernames.setdefault(u.id, u.name)
+                        target.mention_pairs[(uid, u_id)] += 1
+                        main.names.setdefault(u_id, u.display_name)
+                        main.usernames.setdefault(u_id, u.name)
 
                     # Эмодзи (текст доступен только с Message Content Intent)
                     if m.content:
@@ -703,7 +774,7 @@ async def scan_channels(channels, params: ScanParams, state: ScanState,
                     # Реакции под сообщением (счётчики сразу, авторы — отдельными запросами)
                     if params.reactions != "off" and m.reactions:
                         await collect_reactions(m, uid, target, main, state, params,
-                                                own_emoji_ids, spam_rules)
+                                                own_emoji_ids, spam_rules, ident)
 
                     main.channel_names.setdefault(ch.id, label)
                     ts = name_ts.get(uid)
@@ -754,7 +825,8 @@ def _audit_units(entry, code: str) -> int:
         return 1
 
 async def collect_audit(guild: discord.Guild, params: ScanParams,
-                        state: ScanState, result: ScanResult):
+                        state: ScanState, result: ScanResult,
+                        ident: IdentityRules = NO_IDENTITY):
     """Читает журнал аудита сервера за период и складывает счётчики прямо в result.
     Никогда не бросает исключений наружу: при проблемах ставит статус в result.audit_mode
     и пишет примечание в state.notes (оно попадёт на лист «Служебное»)."""
@@ -815,6 +887,9 @@ async def collect_audit(guild: discord.Guild, params: ScanParams,
             user_obj = entry.user
             uid = int(getattr(entry, "user_id", None) or getattr(user_obj, "id", 0) or 0)
             if uid:
+                if ident.skip(uid):
+                    continue                    # действия игнорируемого не учитываем
+                uid = ident.canon(uid)
                 # Боты — только по оригинальному названию (name), люди — по нику на сервере.
                 if getattr(user_obj, "bot", False):
                     nick = getattr(user_obj, "name", None)
@@ -867,13 +942,14 @@ async def scan_guild(guild: discord.Guild, params: ScanParams, bot_user_id: int,
     progress_task = asyncio.create_task(progress_loop(state, status_msg))
     try:
         rules = build_rules(guild.id, params.exclude)
+        ident = build_identity(guild.id)
         channels = await collect_channels(guild, params, rules, state, bot_user_id)
         state.total_channels = len(channels)
         log.info(
             "[%s] к чтению: %d; исключено: %d; без доступа: %d; пропущено как неактивные: %d",
             guild.name, len(channels), len(state.excluded), len(state.skipped), state.inactive,
         )
-        staff = await collect_staff(guild, state)
+        staff = await collect_staff(guild, state, ident)
 
         # Эмодзи этого сервера: всё, чего здесь нет, считается «внешним»
         try:
@@ -884,7 +960,7 @@ async def scan_guild(guild: discord.Guild, params: ScanParams, bot_user_id: int,
         # Ручные антиспам-окна этого сервера (SPAM_FILTER в config.py)
         spam_rules = build_spam_rules(guild.id)
 
-        result = await scan_channels(channels, params, state, own_emoji_ids, spam_rules)
+        result = await scan_channels(channels, params, state, own_emoji_ids, spam_rules, ident)
         if state.counted >= 100 and state.text_seen == 0 and not state.cancelled:
             state.notes.append(
                 "Текст сообщений недоступен (проверьте Message Content Intent): "
@@ -893,7 +969,7 @@ async def scan_guild(guild: discord.Guild, params: ScanParams, bot_user_id: int,
 
         # Журнал аудита (действия администрации)
         if not state.cancelled:
-            await collect_audit(guild, params, state, result)
+            await collect_audit(guild, params, state, result, ident)
 
         result.staff = staff
         return result
