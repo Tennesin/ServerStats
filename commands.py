@@ -160,6 +160,8 @@ async def run_scan(guild, requester, channel, params: ScanParams, state: ScanSta
     fmt="Формат файла (по умолчанию — Excel)",
     exclude="Доп. чаты для пропуска: точные названия через запятую (опционально)",
     reactions="Реакции: счётчики (по умолчанию), «полный» — кто ставил (долго), или не собирать",
+    live="Читать напрямую из Discord, не используя базу данных (медленнее)",
+    nosync="Не читать Discord: построить отчёт только из базы (быстро, по уже собранным данным)",
 )
 @app_commands.rename(fmt="format")
 @app_commands.choices(
@@ -181,11 +183,17 @@ async def stats(
     fmt: Optional[app_commands.Choice[str]] = None,
     exclude: Optional[str] = None,
     reactions: Optional[app_commands.Choice[str]] = None,
+    live: Optional[bool] = None,
+    nosync: Optional[bool] = None,
 ):
     await interaction.response.defer(ephemeral=True, thinking=True)
 
     if not is_allowed(interaction):
         await interaction.followup.send("Нет доступа к этой команде.", ephemeral=True)
+        return
+    if live and nosync:
+        await interaction.followup.send(
+            "Параметры live и nosync несовместимы: live вообще не использует базу.", ephemeral=True)
         return
 
     guild = interaction.guild
@@ -210,6 +218,7 @@ async def stats(
         exclude=exclude or "",
         period_key=p_key, period_label=p_label, compare=bool(compare),
         reactions=reactions.value if reactions else "counts",
+        sync=not nosync, live=bool(live),
     )
 
     state = ScanState(title=guild.name)

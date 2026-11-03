@@ -1,4 +1,4 @@
-"""Сбор данных из Discord: поиск каналов, правила исключений, чтение истории."""
+"""Сбор данных из Discord: поиск каналов, правила исключений, синхронизация с базой и чтение истории."""
 
 import asyncio
 import json
@@ -16,10 +16,12 @@ import discord
 
 from config import (
     ADMIN_ROLES, AUDIT_ENABLED, AUDIT_MAX_ENTRIES, AUDIT_RETENTION_DAYS, AUDIT_SKIP_ACTIONS,
-    CONCURRENCY, DATE_FMT, EXCLUDE_FILE, GUILD_START_DATES, IGNORED_CHATS,
-    MIN_START_DATE, PROGRESS_INTERVAL, REACTION_MAX_REQUESTS, REACTION_MAX_USERS, SPAM_FILTER, TZ,
-    fmt_duration, fmt_list, fmt_num, log, parse_date, MERGE_USERS, IGNORE_USERS
+    CONCURRENCY, DATE_FMT, EXCLUDE_FILE, GUILD_START_DATES, IGNORED_CHATS, IGNORE_USERS,
+    MERGE_USERS, MIN_START_DATE, PROGRESS_INTERVAL, REACTION_MAX_REQUESTS, REACTION_MAX_USERS,
+    REACTION_REFRESH_DAYS, SPAM_FILTER, SYNC_BATCH, TZ,
+    fmt_duration, fmt_list, fmt_num, log, parse_date, today_local,
 )
+from db import get_db, set_meta
 from emoji_utils import normalize_unicode, parse_emoji
 
 # Считаем только обычные сообщения и ответы; системные и сообщения ботов не учитываются.
@@ -49,6 +51,8 @@ class ScanParams:
     period_label: str = ""     # человекочитаемое название пресета
     compare: bool = False      # сравнить с предыдущим периодом той же длины
     reactions: str = "counts"  # реакции: "off" / "counts" (счётчики) / "full" (с авторами реакций)
+    sync: bool = True          # False — не обращаться к Discord за сообщениями, собрать отчёт только из базы
+    live: bool = False         # True — читать Discord напрямую, без базы данных (как раньше)
 
     @property
     def prev_range(self) -> Optional[tuple[date, date]]:
@@ -448,7 +452,8 @@ async def collect_channels(guild: discord.Guild, params: ScanParams,
 
 # ---------- Состав администрации ----------
 
-async def collect_staff(guild: discord.Guild, state: ScanState) -> StaffInfo:
+async def collect_staff(guild: discord.Guild, state: ScanState,
+                        ident: IdentityRules = NO_IDENTITY) -> StaffInfo:
     """Основатель (владелец сервера) + участники с ролями из ADMIN_ROLES."""
     info = StaffInfo(owner_id=guild.owner_id)
 
@@ -550,6 +555,13 @@ def is_spam(rules: dict, key: str, local: datetime) -> bool:
             return True
     return False
 
+def is_spam_dh(rules: dict, key: str, day: date, hour: int) -> bool:
+    """То же, что is_spam, но по готовой локальной дате и часу (для чтения из базы)."""
+    for d, h1, h2 in rules.get(key, ()):
+        if day == d and h1 <= hour < h2:
+            return True
+    return False
+
 def filter_emoji(found: list, local: datetime, rules: Optional[dict], state: ScanState) -> list:
     """Оставляет по одному эмодзи каждого типа на сообщение и убирает ручные окна.
     Всё отброшенное идёт в state.spam_filtered."""
@@ -567,7 +579,7 @@ def filter_emoji(found: list, local: datetime, rules: Optional[dict], state: Sca
         kept.append(item)
     return kept
 
-# ---------- Реакции ----------
+# ---------- Реакции (режим --live) ----------
 
 def reaction_key(emoji):
     """(ключ, имя, анимированный, id кастомного). Ключи те же, что у parse_emoji:
@@ -675,7 +687,7 @@ def _reaction_finish(main: ScanResult, state: ScanState, params: ScanParams):
     if state.reaction_errors:
         state.notes.append(f"Ошибок при чтении авторов реакций: {state.reaction_errors}.")
 
-# ---------- Чтение истории ----------
+# ---------- Чтение истории напрямую (режим --live) ----------
 
 async def scan_channels(channels, params: ScanParams, state: ScanState,
                         own_emoji_ids=frozenset(), spam_rules: Optional[dict] = None,
@@ -713,9 +725,9 @@ async def scan_channels(channels, params: ScanParams, state: ScanState,
                     author = m.author
                     if author.bot or m.type not in COUNTED_TYPES:
                         continue
-                    if ident.skip(author.id):
+                    if ident.skip(author.id):          # игнорируемый пользователь
                         continue
-                    uid = ident.canon(author.id)
+                    uid = ident.canon(author.id)       # главный ID при слиянии
                     if user_id and uid != user_id:
                         continue
                     local = m.created_at.astimezone(TZ)
@@ -735,7 +747,7 @@ async def scan_channels(channels, params: ScanParams, state: ScanState,
                             dst_id = ident.canon(dst.id)
                             reply_dst = dst_id
                             if ident.skip(dst.id):
-                                pass
+                                pass                    # ответ игнорируемому: не учитываем
                             elif dst.bot or dst_id == uid:
                                 target.reply_self_or_bot += 1
                             else:
@@ -807,6 +819,222 @@ async def scan_channels(channels, params: ScanParams, state: ScanState,
         state.notes.append(f"Количество эмодзи, подвергшихся фильтрации: {fmt_num(state.spam_filtered)}.")
     return main
 
+# ---------- Синхронизация с базой (Discord -> SQLite) ----------
+
+class Batch:
+    """Накопитель строк для записи одной пачкой."""
+
+    def __init__(self):
+        self.messages, self.mentions, self.emoji = [], [], []
+        self.reactions, self.rx_users, self.rx_clear = [], [], []
+        self.users_seen, self.users_new, self.emoji_info = [], [], []
+
+    def __len__(self):
+        return len(self.messages)
+
+def flush_batch(db, b: Batch, channel_id: int, watermark: int):
+    """Одна транзакция: все строки пачки + новый водяной знак канала."""
+    with db:
+        db.executemany("INSERT OR IGNORE INTO messages VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", b.messages)
+        db.executemany("INSERT OR IGNORE INTO mentions VALUES (?,?)", b.mentions)
+        db.executemany("INSERT OR IGNORE INTO emoji VALUES (?,?,?)", b.emoji)
+        db.executemany(
+            "INSERT INTO emoji_info VALUES (?,?,?,?,?) ON CONFLICT(guild_id,key) "
+            "DO UPDATE SET name=excluded.name, external=excluded.external", b.emoji_info)
+        # люди, известные только по упоминанию/ответу/реакции: существующие записи не затираем
+        db.executemany(
+            "INSERT OR IGNORE INTO users (guild_id,uid,display_name,username,is_bot) VALUES (?,?,?,?,?)",
+            b.users_new)
+        # авторы сообщений: обновляем ник и аватар, если сообщение свежее
+        db.executemany(
+            "INSERT INTO users VALUES (?,?,?,?,?,?,?) ON CONFLICT(guild_id,uid) DO UPDATE SET "
+            "display_name=excluded.display_name, username=excluded.username, "
+            "avatar_url=excluded.avatar_url, last_seen_ts=excluded.last_seen_ts "
+            "WHERE excluded.last_seen_ts >= users.last_seen_ts", b.users_seen)
+        # реакции этих сообщений перезаписываются целиком (снимок мог измениться)
+        db.executemany("DELETE FROM reactions WHERE message_id=?", [(i,) for i in b.rx_clear])
+        db.executemany("DELETE FROM reaction_users WHERE message_id=?", [(i,) for i in b.rx_clear])
+        db.executemany("INSERT INTO reactions VALUES (?,?,?,?)", b.reactions)
+        db.executemany("INSERT OR IGNORE INTO reaction_users VALUES (?,?,?)", b.rx_users)
+        db.execute("UPDATE channels SET last_synced_id = max(last_synced_id, ?) WHERE channel_id = ?",
+                   (watermark, channel_id))
+
+async def store_message(b: Batch, m: discord.Message, ch, guild: discord.Guild, params: ScanParams,
+                        state: ScanState, own_emoji_ids):
+    """Раскладывает одно сообщение по строкам. Игнор, слияние и антиспам здесь НЕ применяются
+    (они применяются при чтении из базы)."""
+    local = m.created_at.astimezone(TZ)
+    ts = int(m.created_at.timestamp())
+    author = m.author
+    b.users_seen.append((guild.id, author.id, author.display_name, author.name,
+                         author.display_avatar.url, 0, ts))
+
+    # Ответ
+    reply_to, reply_state = None, 0
+    if m.type == discord.MessageType.reply:
+        reply_state = 2
+        ref = m.reference.resolved if m.reference else None
+        if isinstance(ref, discord.Message):
+            reply_to, reply_state = ref.author.id, 1
+            b.users_new.append((guild.id, ref.author.id, ref.author.display_name,
+                                ref.author.name, int(ref.author.bot)))
+
+    # Теги людей
+    for u in m.mentions:
+        b.mentions.append((m.id, u.id))
+        b.users_new.append((guild.id, u.id, u.display_name, u.name, int(u.bot)))
+
+    # Эмодзи в тексте: один тип — один раз на сообщение
+    if m.content:
+        found, only = parse_emoji(m.content)
+        seen_keys = set()
+        for key, ename, animated, cid in found:
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            b.emoji.append((m.id, key, int(only)))
+            external = int(bool(cid) and cid not in own_emoji_ids)
+            b.emoji_info.append((guild.id, key, ename, int(animated), external))
+
+    # Реакции
+    if params.reactions != "off":
+        b.rx_clear.append(m.id)
+        full = params.reactions == "full"
+        if m.reactions:
+            state.reaction_msgs += 1
+        for reaction in m.reactions:
+            if state.cancelled:
+                break
+            count = int(reaction.count or 0)
+            if count <= 0:
+                continue
+            key, ename, animated, cid = reaction_key(reaction.emoji)
+            external = int(bool(cid) and cid not in own_emoji_ids)
+            b.emoji_info.append((guild.id, key, ename, int(animated), external))
+            fetched = 0
+            if full:
+                if state.reaction_requests >= REACTION_MAX_REQUESTS:
+                    if not state.reaction_capped:
+                        state.reaction_capped = True
+                        state.notes.append(
+                            f"Достигнут лимит запросов «кто поставил реакцию» ({REACTION_MAX_REQUESTS}): "
+                            "дальше реакции собирались только счётчиками (без списка людей).")
+                else:
+                    try:
+                        async for user in reaction.users(limit=REACTION_MAX_USERS):
+                            fetched += 1
+                            b.rx_users.append((m.id, key, user.id))
+                            b.users_new.append((guild.id, user.id, user.display_name,
+                                                user.name, int(user.bot)))
+                    except discord.HTTPException as e:
+                        state.reaction_errors += 1
+                        log.warning("Не удалось прочитать авторов реакции под сообщением %s: %s", m.id, e)
+                    state.reaction_requests += max(1, -(-fetched // 100))
+            b.reactions.append((m.id, key, count, fetched))
+
+    b.messages.append((m.id, guild.id, ch.id, author.id, ts, local.date().isoformat(),
+                       local.hour, local.weekday(), int(m.type == discord.MessageType.reply),
+                       reply_to, reply_state, int(bool(m.content))))
+
+async def sync_channel(db, guild: discord.Guild, ch, params: ScanParams, state: ScanState, own_emoji_ids):
+    label = chan_label(ch)
+    wm = db.execute("SELECT last_synced_id FROM channels WHERE channel_id=?", (ch.id,)).fetchone()[0]
+    refresh = params.reactions != "off"
+    floor_id = discord.utils.time_snowflake(
+        datetime.combine(guild_start_date(guild), dtime.min, tzinfo=TZ))
+    refresh_id = discord.utils.time_snowflake(datetime.now(TZ) - timedelta(days=REACTION_REFRESH_DAYS))
+    # читаем с водяного знака; при включённых реакциях захватываем «свежее окно» для обновления реакций
+    if wm and refresh:
+        after_id = max(floor_id, min(wm, refresh_id))
+    else:
+        after_id = max(floor_id, wm)
+
+    # Быстрый пропуск: в канале нет ничего нового и свежего окна тоже
+    last = getattr(ch, "last_message_id", None)
+    if last and last <= wm and (not refresh or last < refresh_id):
+        state.inactive += 1
+        state.channels_done += 1
+        return
+
+    state.in_progress[ch.id] = label
+    b, last_id = Batch(), wm
+    try:
+        async for m in ch.history(limit=None, after=discord.Object(id=after_id), oldest_first=True):
+            if state.cancelled:
+                break
+            state.seen += 1
+            if not (m.author.bot or m.type not in COUNTED_TYPES):
+                await store_message(b, m, ch, guild, params, state, own_emoji_ids)
+                state.counted += 1
+            last_id = max(last_id, m.id)          # после полной обработки сообщения
+            if len(b) >= SYNC_BATCH:
+                flush_batch(db, b, ch.id, last_id)
+                b = Batch()
+    except discord.Forbidden:
+        state.skipped.append(label)
+    except discord.HTTPException as e:
+        log.warning("Ошибка чтения %s: %s", label, e)
+        state.failed.append(f"{label} (HTTP {e.status})")
+    finally:
+        flush_batch(db, b, ch.id, last_id)        # то, что успели, сохраняется даже при отмене
+        state.in_progress.pop(ch.id, None)
+        if not state.cancelled:
+            state.channels_done += 1
+
+async def sync_guild(guild: discord.Guild, params: ScanParams, bot_user_id: int,
+                     state: ScanState, rules: ExcludeRules):
+    """Дочитывает в базу всё новое по серверу."""
+    db = get_db()
+    started = int(time.time())
+    g_start = guild_start_date(guild)
+
+    # С какой даты искать архивные ветки: от прошлой удачной синхронизации (с запасом)
+    row = db.execute("SELECT MAX(finished_ts) FROM sync_runs WHERE guild_id=? AND status='ok'",
+                     (guild.id,)).fetchone()
+    since = g_start
+    if row and row[0]:
+        since = max(g_start, datetime.fromtimestamp(row[0], TZ).date()
+                    - timedelta(days=REACTION_REFRESH_DAYS + 1))
+
+    disc_params = replace(params, start_date=since, end_date=None, channel=None, compare=False)
+    channels = await collect_channels(guild, disc_params, rules, state, bot_user_id)
+    state.total_channels = len(channels)
+    log.info("[%s] синхронизация: каналов к проверке %d; исключено %d; без доступа %d",
+             guild.name, len(channels), len(state.excluded), len(state.skipped))
+
+    with db:
+        db.executemany(
+            "INSERT INTO channels (channel_id,guild_id,parent_id,name,label) VALUES (?,?,?,?,?) "
+            "ON CONFLICT(channel_id) DO UPDATE SET name=excluded.name, label=excluded.label, "
+            "parent_id=excluded.parent_id",
+            [(c.id, guild.id, getattr(c, "parent_id", None), c.name, chan_label(c)) for c in channels])
+
+    try:
+        own_emoji_ids = frozenset(e.id for e in await guild.fetch_emojis())
+    except discord.HTTPException:
+        own_emoji_ids = frozenset(e.id for e in guild.emojis)
+
+    sem = asyncio.Semaphore(CONCURRENCY)
+
+    async def one(ch):
+        async with sem:
+            if not state.cancelled:
+                await sync_channel(db, guild, ch, params, state, own_emoji_ids)
+
+    tasks = [asyncio.create_task(one(c)) for c in channels]
+    try:
+        await asyncio.gather(*tasks)
+    except BaseException:
+        for t in tasks:
+            t.cancel()
+        raise
+
+    status = "cancelled" if state.cancelled else ("partial" if state.failed else "ok")
+    with db:
+        db.execute("INSERT INTO sync_runs (guild_id,started_ts,finished_ts,status,reactions_mode,messages_read) "
+                   "VALUES (?,?,?,?,?,?)",
+                   (guild.id, started, int(time.time()), status, params.reactions, state.seen))
+
 # ---------- Журнал аудита ----------
 
 def _audit_units(entry, code: str) -> int:
@@ -824,10 +1052,100 @@ def _audit_units(entry, code: str) -> int:
     except (TypeError, ValueError):
         return 1
 
-async def collect_audit(guild: discord.Guild, params: ScanParams,
-                        state: ScanState, result: ScanResult,
-                        ident: IdentityRules = NO_IDENTITY):
-    """Читает журнал аудита сервера за период и складывает счётчики прямо в result.
+async def collect_audit(guild: discord.Guild, state: ScanState):
+    """Дописывает в базу новые записи журнала аудита (с последней сохранённой записи).
+    Игнор, слияние и AUDIT_SKIP_ACTIONS применяются позже, при чтении из базы.
+    Исключений наружу не бросает: статус пишется в meta, примечания — в state.notes."""
+    if not AUDIT_ENABLED:
+        return
+    db = get_db()
+    gid = guild.id
+    me = guild.me
+    if me is not None and not me.guild_permissions.view_audit_log:
+        set_meta(db, f"audit_status:{gid}", "denied")
+        state.notes.append("Журнал аудита не собран: у бота нет права «Просмотр журнала аудита».")
+        return
+
+    row = db.execute("SELECT MAX(entry_id) FROM audit_entries WHERE guild_id=?", (gid,)).fetchone()
+    last_id = row[0] if row and row[0] else 0
+    kwargs = {"limit": None, "oldest_first": True}
+    if last_id:
+        kwargs["after"] = discord.Object(id=last_id)
+
+    rows: list = []
+    people: list = []
+    stored = 0
+    truncated = False
+    status = "ok"
+    cancelled = False
+
+    def flush():
+        nonlocal rows, people
+        if rows or people:
+            with db:
+                db.executemany("INSERT OR IGNORE INTO audit_entries VALUES (?,?,?,?,?,?,?)", rows)
+                db.executemany(
+                    "INSERT OR IGNORE INTO users (guild_id,uid,display_name,username,is_bot) VALUES (?,?,?,?,?)",
+                    people)
+        rows, people = [], []
+
+    state.in_progress[-1] = "журнал аудита"
+    try:
+        async for entry in guild.audit_logs(**kwargs):
+            if state.cancelled:
+                cancelled = True
+                break
+            if stored >= AUDIT_MAX_ENTRIES:
+                truncated = True
+                state.notes.append(
+                    f"Журнал аудита обрезан лимитом {fmt_num(AUDIT_MAX_ENTRIES)} записей за один сбор: "
+                    "следующий сбор продолжит с этого места.")
+                break
+
+            code = getattr(entry.action, "name", None) or str(entry.action)
+            user_obj = entry.user
+            uid = int(getattr(entry, "user_id", None) or getattr(user_obj, "id", 0) or 0)
+            if uid:
+                # Боты — по оригинальному названию (name), люди — по нику на сервере.
+                if getattr(user_obj, "bot", False):
+                    nick = getattr(user_obj, "name", None)
+                else:
+                    nick = getattr(user_obj, "display_name", None) or getattr(user_obj, "name", None)
+                if nick:
+                    people.append((gid, uid, str(nick), str(getattr(user_obj, "name", "") or ""),
+                                   int(bool(getattr(user_obj, "bot", False)))))
+            rows.append((entry.id, gid, int(entry.created_at.timestamp()),
+                         entry.created_at.astimezone(TZ).date().isoformat(),
+                         code, uid, _audit_units(entry, code)))
+            stored += 1
+            if len(rows) >= 1000:
+                flush()
+    except discord.Forbidden:
+        status = "denied" if (stored == 0 and not last_id) else "failed"
+        state.notes.append("Журнал аудита: Discord отказал в доступе (нужно право «Просмотр журнала аудита»).")
+    except discord.HTTPException as e:
+        status = "failed"
+        log.warning("[%s] Не удалось прочитать журнал аудита: %s", guild.name, e)
+        state.notes.append(f"Чтение журнала аудита прервалось ошибкой (HTTP {e.status}): данные аудита неполные.")
+    except Exception:
+        status = "failed"
+        log.exception("[%s] Неожиданная ошибка при чтении журнала аудита", guild.name)
+        state.notes.append("Чтение журнала аудита прервалось ошибкой (подробности в консоли бота): данные аудита неполные.")
+    finally:
+        flush()
+        state.in_progress.pop(-1, None)
+
+    if cancelled:
+        return                                   # статус не меняем: следующий сбор продолжит с последней записи
+    set_meta(db, f"audit_status:{gid}", status)
+    set_meta(db, f"audit_truncated:{gid}", "1" if truncated else "0")
+    if status == "ok" and not db.execute("SELECT 1 FROM meta WHERE key=?", (f"audit_since:{gid}",)).fetchone():
+        set_meta(db, f"audit_since:{gid}", today_local().isoformat())
+
+async def collect_audit_live(guild: discord.Guild, params: ScanParams,
+                             state: ScanState, result: ScanResult,
+                             ident: IdentityRules = NO_IDENTITY):
+    """Прежняя версия (режим --live): читает журнал аудита за период и складывает счётчики в result.
     Никогда не бросает исключений наружу: при проблемах ставит статус в result.audit_mode
     и пишет примечание в state.notes (оно попадёт на лист «Служебное»)."""
     result.audit_mode = "off"
@@ -925,6 +1243,8 @@ async def collect_audit(guild: discord.Guild, params: ScanParams,
     finally:
         state.in_progress.pop(-1, None)
 
+# ---------- Сбор по серверу ----------
+
 async def progress_loop(state: ScanState, status_msg: Optional[discord.Message]):
     while True:
         await asyncio.sleep(PROGRESS_INTERVAL)
@@ -936,42 +1256,67 @@ async def progress_loop(state: ScanState, status_msg: Optional[discord.Message])
             except discord.HTTPException:
                 pass
 
+async def scan_guild_live(guild: discord.Guild, params: ScanParams, bot_user_id: int,
+                          state: ScanState) -> ScanResult:
+    """Прямой сбор без базы данных (как было раньше)."""
+    rules = build_rules(guild.id, params.exclude)
+    ident = build_identity(guild.id)
+    channels = await collect_channels(guild, params, rules, state, bot_user_id)
+    state.total_channels = len(channels)
+    log.info(
+        "[%s] к чтению: %d; исключено: %d; без доступа: %d; пропущено как неактивные: %d",
+        guild.name, len(channels), len(state.excluded), len(state.skipped), state.inactive,
+    )
+    staff = await collect_staff(guild, state, ident)
+
+    # Эмодзи этого сервера: всё, чего здесь нет, считается «внешним»
+    try:
+        own_emoji_ids = frozenset(e.id for e in await guild.fetch_emojis())
+    except discord.HTTPException:
+        own_emoji_ids = frozenset(e.id for e in guild.emojis)
+
+    # Ручные антиспам-окна этого сервера (SPAM_FILTER в config.py)
+    spam_rules = build_spam_rules(guild.id)
+
+    result = await scan_channels(channels, params, state, own_emoji_ids, spam_rules, ident)
+    if state.counted >= 100 and state.text_seen == 0 and not state.cancelled:
+        state.notes.append(
+            "Текст сообщений недоступен (проверьте Message Content Intent): "
+            "данные по эмодзи пустые, это не значит, что их никто не использует."
+        )
+    if not state.cancelled:
+        await collect_audit_live(guild, params, state, result, ident)
+    result.staff = staff
+    return result
+
 async def scan_guild(guild: discord.Guild, params: ScanParams, bot_user_id: int,
                      state: ScanState, status_msg: Optional[discord.Message] = None) -> ScanResult:
-    """Полный сбор по одному серверу. Регистрацией в `running` управляет вызывающий."""
+    """Полный сбор по одному серверу. Регистрацией в `running` управляет вызывающий.
+    live=True — напрямую из Discord; иначе: синхронизация с базой (если sync=True) и отчёт из базы."""
     progress_task = asyncio.create_task(progress_loop(state, status_msg))
     try:
+        if params.live:
+            return await scan_guild_live(guild, params, bot_user_id, state)
+
         rules = build_rules(guild.id, params.exclude)
         ident = build_identity(guild.id)
-        channels = await collect_channels(guild, params, rules, state, bot_user_id)
-        state.total_channels = len(channels)
-        log.info(
-            "[%s] к чтению: %d; исключено: %d; без доступа: %d; пропущено как неактивные: %d",
-            guild.name, len(channels), len(state.excluded), len(state.skipped), state.inactive,
-        )
-        staff = await collect_staff(guild, state, ident)
-
-        # Эмодзи этого сервера: всё, чего здесь нет, считается «внешним»
-        try:
-            own_emoji_ids = frozenset(e.id for e in await guild.fetch_emojis())
-        except discord.HTTPException:
-            own_emoji_ids = frozenset(e.id for e in guild.emojis)
-
-        # Ручные антиспам-окна этого сервера (SPAM_FILTER в config.py)
         spam_rules = build_spam_rules(guild.id)
 
-        result = await scan_channels(channels, params, state, own_emoji_ids, spam_rules, ident)
+        if params.sync:
+            await sync_guild(guild, params, bot_user_id, state, rules)
+            if not state.cancelled:
+                await collect_audit(guild, state)
+
+        from dbresult import build_result            # импорт здесь: избегаем циклической зависимости
+        state.counted = 0                            # при синхронизации счётчик уже рос; считаем заново по базе
+        result = await asyncio.to_thread(build_result, guild.id, params, state, rules, ident, spam_rules)
+
         if state.counted >= 100 and state.text_seen == 0 and not state.cancelled:
             state.notes.append(
                 "Текст сообщений недоступен (проверьте Message Content Intent): "
                 "данные по эмодзи пустые, это не значит, что их никто не использует."
             )
-
-        # Журнал аудита (действия администрации)
-        if not state.cancelled:
-            await collect_audit(guild, params, state, result, ident)
-
-        result.staff = staff
+        result.staff = await collect_staff(guild, state, ident)
         return result
     finally:
         progress_task.cancel()

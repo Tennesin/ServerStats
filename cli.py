@@ -37,12 +37,14 @@ CLI_HELP = """
   --compare          сравнить с предыдущим периодом такой же длины (читает вдвое больше)
   --exclude "чат1,чат2"   --detail days|weeks|months|auto   --sort count|name
   --reactions counts|full|off   — реакции: счётчики (по умолчанию), полный (кто ставил, медленно), не собирать
+  --nosync           построить отчёт только из базы данных, не читая Discord (быстро)
+  --live             собрать напрямую из Discord, не используя базу данных (как раньше)
 Во всех режимах, включая заданные вручную даты и отсутствие конца, 
 учитываются только завершённые сутки (последний день — вчера).
 """
 
 VALUE_OPTS = {"period", "last", "start", "end", "exclude", "detail", "sort", "reactions"}
-FLAG_OPTS = {"compare"}
+FLAG_OPTS = {"compare", "nosync", "live"}
 
 _cli = {"busy": False, "cancel": False}
 
@@ -52,13 +54,13 @@ def parse_cli_stats(args: list[str]):
     all_guilds = False
     opts = {"period": None, "last": None, "start": None, "end": None,
             "exclude": "", "detail": "auto", "sort": "count", "reactions": "counts"}
-    compare = False
+    flags: set[str] = set()
     it = iter(args)
     for a in it:
         if a.startswith("--"):
             key = a[2:]
             if key in FLAG_OPTS:
-                compare = True
+                flags.add(key)
                 continue
             if key not in VALUE_OPTS:
                 raise ValueError(f"Неизвестный параметр: {a}")
@@ -75,6 +77,10 @@ def parse_cli_stats(args: list[str]):
                 ids.append(int(tok))
             elif tok:
                 raise ValueError(f"Не понял аргумент: {tok}")
+
+    if "live" in flags and "nosync" in flags:
+        raise ValueError("--live и --nosync несовместимы: --live не использует базу вовсе.")
+    compare = "compare" in flags
 
     if opts["last"]:
         if opts["period"]:
@@ -94,6 +100,7 @@ def parse_cli_stats(args: list[str]):
         start_date=s, end_date=e, user=None, channel=None,
         sort_key=opts["sort"], detail=opts["detail"], fmt="xlsx", exclude=opts["exclude"],
         period_key=key, period_label=label, compare=compare, reactions=opts["reactions"],
+        sync="nosync" not in flags, live="live" in flags,
     )
     return ids, all_guilds, params
 

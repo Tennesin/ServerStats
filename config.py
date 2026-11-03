@@ -82,6 +82,13 @@ EXCLUDE_FILE = os.environ.get("EXCLUDE_FILE") or os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "excluded_chats.json"
 )
 
+# SQLite-база (создаётся автоматически рядом с ботом)
+DB_PATH = os.environ.get("DB_PATH") or os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "stats.db"
+)
+REACTION_REFRESH_DAYS = 14   # сообщения младше N дней перечитываются при каждой синхронизации (реакции меняются)
+SYNC_BATCH = 500             # сколько сообщений накапливать перед записью в базу
+
 DATE_FMT = "%d.%m.%Y"
 # Глобальный нижний предел: раньше этой даты не читаем ни один сервер.
 MIN_START_DATE = date(2026, 9, 27)
