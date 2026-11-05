@@ -17,8 +17,8 @@ from config import (
 )
 from reports import build_report, build_xlsx
 from scanner import (
-    ScanParams, ScanState, background_tasks, load_store, looks_like_id,
-    norm_name, running, save_store, scan_guild,
+    ScanParams, ScanState, background_tasks, guild_start_date, load_store, looks_like_id,
+    norm_name, params_for_guild, running, save_store, scan_guild, sync_only,
 )
 
 def is_allowed(interaction: discord.Interaction) -> bool:
@@ -294,6 +294,98 @@ async def cancel(interaction: discord.Interaction):
         "Останавливаю. Пришлю то, что успел собрать.", ephemeral=True
     )
 
+# ---------- /sync ----------
+
+async def run_sync(guild, requester, channel, reactions: str, state: ScanState,
+                   status_msg: Optional[discord.Message], bot_user_id: int):
+    final_text = "✅ База обновлена."
+    try:
+        await sync_only(guild, reactions, bot_user_id, state, status_msg)
+        if state.cancelled:
+            final_text = "⛔ Обновление остановлено вручную (то, что успело записаться, сохранено)."
+        elif state.failed or state.skipped:
+            final_text = "⚠️ База обновлена с пропусками (подробности ниже)."
+        lines = [
+            f"{final_text} Заняло {state.elapsed()}.",
+            f"Просмотрено сообщений: {fmt_num(state.seen)}, обработано новых/обновлённых: {fmt_num(state.counted)}.",
+            f"Каналов проверено: {state.channels_done}/{state.total_channels}"
+            f" (без изменений пропущено: {state.inactive}).",
+        ]
+        if state.skipped:
+            lines.append(f"Нет доступа: {len(state.skipped)} канал(ов).")
+        if state.failed:
+            lines.append(f"Ошибки чтения: {len(state.failed)}.")
+        lines.extend(f"• {n}" for n in state.notes[:5])
+        await send_with_fallback(requester, channel, "\n".join(lines)[:1900])
+    except Exception:
+        log.exception("Обновление базы завершилось ошибкой")
+        final_text = "❌ Обновление базы прервалось из-за ошибки (подробности в консоли бота)."
+        await send_with_fallback(requester, channel, final_text)
+    finally:
+        state.done = True
+        running.pop(guild.id, None)
+        if status_msg is not None:
+            with suppress(discord.HTTPException):
+                await status_msg.edit(content=f"{final_text} (заняло {state.elapsed()})")
+
+@app_commands.command(
+    name="sync",
+    description="Обновить базу данных из Discord (только новое), без построения отчётов",
+)
+@app_commands.guild_only()
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(
+    reactions="Реакции: счётчики (перечитывает последние 14 дней), «полный» (медленно) или не трогать (быстрее всего)",
+)
+@app_commands.choices(
+    reactions=[app_commands.Choice(name=label, value=key) for key, label in REACTION_LABELS.items()],
+)
+async def sync_cmd(
+    interaction: discord.Interaction,
+    reactions: Optional[app_commands.Choice[str]] = None,
+):
+    await interaction.response.defer(ephemeral=True, thinking=True)
+
+    if not is_allowed(interaction):
+        await interaction.followup.send("Нет доступа к этой команде.", ephemeral=True)
+        return
+
+    guild = interaction.guild
+    if guild.id in running:
+        await interaction.followup.send(
+            "На этом сервере уже идёт сбор. Дождитесь результата или остановите его через /cancel.",
+            ephemeral=True,
+        )
+        return
+
+    mode = reactions.value if reactions else "counts"
+    state = ScanState(title=guild.name)
+    running[guild.id] = state
+    try:
+        status_msg = None
+        dm_ok = True
+        try:
+            status_msg = await interaction.user.send("⏳ Начинаю обновление базы…")
+        except discord.HTTPException:
+            dm_ok = False
+
+        where = ("Прогресс и результат пришлю вам в личные сообщения." if dm_ok else
+                 "Личные сообщения закрыты, поэтому результат придёт в этот канал.")
+        slow = ("\n⚠ Для реакций выбран режим «полный»: обновление может идти долго."
+                if mode == "full" else "")
+        await interaction.followup.send(
+            f"Обновление базы запущено. {where}{slow}\nОстановить: /cancel.", ephemeral=True)
+
+        task = asyncio.create_task(run_sync(
+            guild, interaction.user, interaction.channel, mode, state,
+            status_msg, interaction.client.user.id,
+        ))
+        background_tasks.add(task)
+        task.add_done_callback(background_tasks.discard)
+    except Exception:
+        running.pop(guild.id, None)
+        raise
+
 # ---------- /exclude ----------
 
 exclude_group = app_commands.Group(
@@ -447,5 +539,6 @@ def register_commands(bot: discord.Client):
     """Подключает все слеш-команды к дереву команд бота (bot.tree)."""
     bot.tree.add_command(stats)
     bot.tree.add_command(cancel)
+    bot.tree.add_command(sync_cmd)
     bot.tree.add_command(exclude_group)
     bot.tree.error(on_app_command_error)

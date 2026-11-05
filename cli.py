@@ -18,13 +18,15 @@ from config import (
 from reports import build_xlsx, period_text
 from scanner import (
     ScanParams, ScanState, background_tasks, merge_results, running, scan_guild,
-    guild_start_date, params_for_guild,
+    guild_start_date, params_for_guild, sync_only,
 )
 
 CLI_HELP = """
 Команды терминала:
   -stats ID1 ID2 ... [параметры]   — собрать статистику по указанным серверам
   -stats all [параметры]           — по всем серверам, где есть бот
+  -sync ID1 ID2 ... [--reactions counts|full|off]  — обновить только базу, без отчётов
+  -sync all [--reactions counts|full|off]          — то же по всем серверам
   -servers                         — показать серверы бота и их ID
   -cancel                          — остановить текущий сбор (отчёт будет неполным)
   -help                            — эта справка
@@ -103,6 +105,62 @@ def parse_cli_stats(args: list[str]):
         sync="nosync" not in flags, live="live" in flags,
     )
     return ids, all_guilds, params
+
+def parse_cli_sync(args: list[str]):
+    """Возвращает (ids, all_guilds, reactions). Бросает ValueError."""
+    ids: list[int] = []
+    all_guilds = False
+    reactions = "counts"
+    it = iter(args)
+    for a in it:
+        if a == "--reactions":
+            val = next(it, None)
+            if val is None:
+                raise ValueError("У параметра --reactions нет значения")
+            reactions = val.strip().lower()
+            continue
+        if a.startswith("--"):
+            raise ValueError(f"Неизвестный параметр: {a}")
+        for tok in a.replace(",", " ").split():
+            tok = tok.strip("[]")
+            if tok.lower() == "all":
+                all_guilds = True
+            elif tok.isdigit():
+                ids.append(int(tok))
+            elif tok:
+                raise ValueError(f"Не понял аргумент: {tok}")
+    if reactions not in REACTION_LABELS:
+        raise ValueError(f"--reactions: одно из {', '.join(REACTION_LABELS)}")
+    return ids, all_guilds, reactions
+
+async def run_sync_batch(bot: discord.Client, guilds: list[discord.Guild], reactions: str):
+    _cli["busy"], _cli["cancel"] = True, False
+    started = time.monotonic()
+    try:
+        for i, g in enumerate(guilds, start=1):
+            if _cli["cancel"]:
+                break
+            if g.id in running:
+                print(f"⚠ Сервер «{g.name}» уже обрабатывается (/stats или /sync) — пропускаю.", flush=True)
+                continue
+            print(f"▶ [{i}/{len(guilds)}] Обновляю базу: «{g.name}» ({g.id})", flush=True)
+            state = ScanState(title=g.name)
+            running[g.id] = state
+            try:
+                await sync_only(g, reactions, bot.user.id, state)
+            finally:
+                state.done = True
+                running.pop(g.id, None)
+            flag = " (остановлено, данные частичные)" if state.cancelled else ""
+            print(f"✔ «{g.name}»: просмотрено {fmt_num(state.seen)}, обработано {fmt_num(state.counted)}, "
+                  f"каналов {state.channels_done}/{state.total_channels}{flag}", flush=True)
+            for n in state.notes[:5]:
+                print(f"   • {n}", flush=True)
+        print(f"✅ Обновление базы завершено за {fmt_duration(time.monotonic() - started)}.", flush=True)
+    except Exception:
+        log.exception("Обновление базы завершилось ошибкой")
+    finally:
+        _cli["busy"] = False
 
 async def run_batch(bot: discord.Client, guilds: list[discord.Guild], params: ScanParams):
     _cli["busy"], _cli["cancel"] = True, False
@@ -185,6 +243,34 @@ async def handle_console_line(bot: discord.Client, line: str):
         for st in running.values():
             st.cancelled = True
         print("Останавливаю… Сохраню то, что успел собрать.", flush=True)
+    elif cmd == "-sync":
+        if _cli["busy"]:
+            print("Пакетная операция уже идёт. Дождитесь окончания или введите -cancel.", flush=True)
+            return
+        try:
+            ids, all_guilds, reactions = parse_cli_sync(args)
+        except ValueError as e:
+            print(f"Ошибка: {e}", flush=True)
+            return
+        if all_guilds:
+            guilds = list(bot.guilds)
+        else:
+            guilds, seen_ids = [], set()
+            for gid in ids:
+                if gid in seen_ids:
+                    continue
+                seen_ids.add(gid)
+                g = bot.get_guild(gid)
+                if g is None:
+                    print(f"⚠ Сервер {gid} не найден среди серверов бота — пропускаю.", flush=True)
+                else:
+                    guilds.append(g)
+        if not guilds:
+            print("Не указано ни одного доступного сервера. Пример: -sync all", flush=True)
+            return
+        task = asyncio.create_task(run_sync_batch(bot, guilds, reactions))
+        background_tasks.add(task)
+        task.add_done_callback(background_tasks.discard)
     elif cmd == "-stats":
         if _cli["busy"]:
             print("Пакетный сбор уже идёт. Дождитесь окончания или введите -cancel.", flush=True)

@@ -1323,6 +1323,25 @@ async def scan_guild(guild: discord.Guild, params: ScanParams, bot_user_id: int,
         with suppress(asyncio.CancelledError):
             await progress_task
 
+async def sync_only(guild: discord.Guild, reactions: str, bot_user_id: int,
+                    state: ScanState, status_msg: Optional[discord.Message] = None):
+    """Только дочитывает новое из Discord в базу (сообщения, реакции, журнал аудита).
+    Отчёты не строятся, файлы не создаются. Регистрацией в `running` управляет вызывающий."""
+    params = ScanParams(
+        start_date=None, end_date=None, user=None, channel=None,
+        sort_key="count", reactions=reactions,
+    )
+    progress_task = asyncio.create_task(progress_loop(state, status_msg))
+    try:
+        rules = build_rules(guild.id, "")
+        await sync_guild(guild, params, bot_user_id, state, rules)
+        if not state.cancelled:
+            await collect_audit(guild, state)
+    finally:
+        progress_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await progress_task
+
 # ---------- Объединение серверов ----------
 
 def _merge_into(dst: ScanResult, src: ScanResult, server: Optional[str]):
