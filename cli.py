@@ -1,4 +1,5 @@
-"""Управление из терминала: -stats ID1 ID2 ..., -servers, -cancel, -help."""
+"""Управление из терминала: -stats, -sync, -servers, -cancel.
+Справка — в файле, который создаёт help_gen.py."""
 
 import asyncio
 import os
@@ -20,30 +21,6 @@ from scanner import (
     ScanParams, ScanState, background_tasks, merge_results, running, scan_guild,
     guild_start_date, params_for_guild, sync_only,
 )
-
-CLI_HELP = """
-Команды терминала:
-  -stats ID1 ID2 ... [параметры]   — собрать статистику по указанным серверам
-  -stats all [параметры]           — по всем серверам, где есть бот
-  -sync ID1 ID2 ... [--reactions counts|full|off]  — обновить только базу, без отчётов
-  -sync all [--reactions counts|full|off]          — то же по всем серверам
-  -servers                         — показать серверы бота и их ID
-  -cancel                          — остановить текущий сбор (отчёт будет неполным)
-  -help                            — эта справка
-
-Параметры -stats:
-  --period ПЕРИОД    пресет: yesterday, this-week, prev-week, this-month, prev-month,
-                     this-year, prev-year, last7d, last30d, last3m, last1y …
-  --last 45d         то же, что --period last45d (d — дни, w — недели, m — месяцы, y — годы)
-  --start дд.мм.гггг, --end дд.мм.гггг   — свои даты (вместо пресета)
-  --compare          сравнить с предыдущим периодом такой же длины (читает вдвое больше)
-  --exclude "чат1,чат2"   --detail days|weeks|months|auto   --sort count|name
-  --reactions counts|full|off   — реакции: счётчики (по умолчанию), полный (кто ставил, медленно), не собирать
-  --nosync           построить отчёт только из базы данных, не читая Discord (быстро)
-  --live             собрать напрямую из Discord, не используя базу данных (как раньше)
-Во всех режимах, включая заданные вручную даты и отсутствие конца, 
-учитываются только завершённые сутки (последний день — вчера).
-"""
 
 VALUE_OPTS = {"period", "last", "start", "end", "exclude", "detail", "sort", "reactions"}
 FLAG_OPTS = {"compare", "nosync", "live"}
@@ -231,9 +208,7 @@ async def handle_console_line(bot: discord.Client, line: str):
         return
     cmd, args = parts[0].lower(), parts[1:]
 
-    if cmd == "-help":
-        print(CLI_HELP, flush=True)
-    elif cmd == "-servers":
+    if cmd == "-servers":
         for g in sorted(bot.guilds, key=lambda x: x.name.casefold()):
             members = f", участников: {fmt_num(g.member_count)}" if g.member_count else ""
             print(f"  {g.id}  {g.name}{members}", flush=True)
@@ -302,14 +277,16 @@ async def handle_console_line(bot: discord.Client, line: str):
         background_tasks.add(task)
         task.add_done_callback(background_tasks.discard)
     else:
-        print(f"Неизвестная команда: {cmd}. Введите -help.", flush=True)
+        print(
+            f"Неизвестная команда: {cmd}. "
+            f"Список команд — в файле «Команды бота.txt» (создаётся запуском help_gen.py).",
+            flush=True)
 
 async def console_loop(bot: discord.Client, queue: asyncio.Queue):
     await bot.wait_until_ready()
-    print(CLI_HELP, flush=True)
     while True:
         line = await queue.get()
-        if line is None:      # stdin закрыт
+        if line is None:
             return
         if line.strip():
             await handle_console_line(bot, line.strip())

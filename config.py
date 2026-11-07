@@ -4,8 +4,6 @@
 Переменные окружения (или файл .env рядом со скриптом):
   DISCORD_TOKEN    — токен бота (обязательно)
   TIMEZONE         — часовой пояс для границ дней (по умолчанию Asia/Tashkent)
-  ALLOWED_USER_ID  — если задан, команды доступны только пользователю с этим ID
-                     (иначе — любому администратору сервера)
   STATS_DIR        — куда сохранять отчёты (по умолчанию папка output рядом с запуском)
   CONCURRENCY      — сколько каналов читать одновременно (по умолчанию 4)
   EXCLUDE_FILE     — путь к JSON-файлу со списком исключений
@@ -74,9 +72,8 @@ MERGE_USERS = [
 TOKEN = os.environ.get("DISCORD_TOKEN")
 TZ_NAME = os.environ.get("TIMEZONE", "Asia/Tashkent").strip() or "Asia/Tashkent"
 STATS_DIR = os.environ.get("STATS_DIR")
-# Куда складываются отчёты, собранные за ВСЮ историю (без пресета и без дат). Можно переопределить через .env
+# Куда складываются отчёты, собранные за ВСЮ историю
 ALLDAY_DIR = os.environ.get("ALLDAY_DIR")
-ALLOWED_USER_ID = int(os.environ.get("ALLOWED_USER_ID", "0") or 0)
 CONCURRENCY = max(1, int(os.environ.get("CONCURRENCY", "4") or 4))
 EXCLUDE_FILE = os.environ.get("EXCLUDE_FILE") or os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "excluded_chats.json"
