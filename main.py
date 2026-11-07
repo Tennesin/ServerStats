@@ -20,7 +20,6 @@
 """
 
 import discord
-from discord import app_commands
 
 from cli import start_console
 from config import ADMIN_ROLES, IGNORED_CHATS, TOKEN, log
@@ -33,14 +32,8 @@ class StatBot(discord.Client):
         intents.emojis_and_stickers = True   # список эмодзи сервера: отличать «свои» от «внешних»
         intents.message_content = True       # привилегированный: текст сообщений для разбора эмодзи
         super().__init__(intents=intents)
-        self.tree = app_commands.CommandTree(self)   # пустое дерево: команд больше нет
 
     async def setup_hook(self):
-        # ОДНОРАЗОВО: синхронизация пустого дерева стирает старые слеш-команды из Discord.
-        # Без этого /stats и остальные продолжат висеть в списке команд и отвечать ошибкой.
-        # После первого запуска эти две строки можно удалить (вместе с self.tree выше и импортом app_commands).
-        await self.tree.sync()
-        log.info("Старые слеш-команды удалены из Discord.")
         start_console(self)
 
     async def on_ready(self):

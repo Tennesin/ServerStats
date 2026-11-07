@@ -9,7 +9,7 @@ import threading
 import time
 from datetime import datetime
 from dataclasses import replace
-
+import re
 import discord
 
 from config import (
@@ -198,7 +198,137 @@ async def run_batch(bot: discord.Client, guilds: list[discord.Guild], params: Sc
     finally:
         _cli["busy"] = False
 
+SAY_MAX = 2000
+_MENTION_RE = re.compile(r"(?<![<\w])@(?:\{([^}]+)\}|([\w.\-]+))")
+
+def resolve_mentions(guild: discord.Guild, text: str):
+    """@имя / @{имя с пробелами} / @ID -> <@id> (роли -> <@&id>). Возвращает (текст, список ошибок)."""
+    errors: list[str] = []
+
+    def repl(m):
+        raw = m.group(1) or m.group(2)
+        low = raw.casefold()
+        if low in ("everyone", "here"):
+            return m.group(0)                      # остаётся обычным текстом, пинга не будет
+        if raw.isdigit() and len(raw) >= 17:
+            return f"<@{raw}>"
+        members = [mb for mb in guild.members
+                   if low in {mb.name.casefold(), mb.display_name.casefold(),
+                              (mb.global_name or "").casefold()}]
+        if len(members) == 1:
+            return f"<@{members[0].id}>"
+        if len(members) > 1:
+            variants = ", ".join(f"{mb.display_name} ({mb.id})" for mb in members[:5])
+            errors.append(f"@{raw}: подходит несколько человек: {variants}. Укажите ID: @ID")
+            return m.group(0)
+        roles = [r for r in guild.roles if not r.is_default() and r.name.casefold() == low]
+        if len(roles) == 1:
+            return f"<@&{roles[0].id}>"
+        if len(roles) > 1:
+            errors.append(f"@{raw}: ролей с таким названием несколько.")
+            return m.group(0)
+        errors.append(f"@{raw}: никого не найдено (проверьте написание или укажите ID).")
+        return m.group(0)
+
+    return _MENTION_RE.sub(repl, text), errors
+
+async def say(bot: discord.Client, line: str):
+    """-say ID_канала [--reply ID_сообщения] [--noping] текст: отправляет сообщение от имени бота."""
+    usage = ("Использование: -say ID_канала [--reply ID_сообщения] [--noping] текст сообщения   "
+             "(теги: @имя или @{имя с пробелами})")
+    parts = line.split(maxsplit=2)
+    if len(parts) < 3 or not parts[1].isdigit():
+        print(usage, flush=True)
+        return
+    cid, rest = int(parts[1]), parts[2]
+
+    # Необязательные параметры перед текстом
+    reply_id, ping = None, True
+    while rest.startswith("--"):
+        head, _, tail = rest.partition(" ")
+        name = head.lower()
+        if name == "--reply":
+            num, _, tail = tail.lstrip().partition(" ")
+            if not num.isdigit():
+                print("⚠ После --reply нужен ID сообщения (число).", flush=True)
+                return
+            reply_id = int(num)
+        elif name == "--noping":
+            ping = False
+        else:
+            print(f"⚠ Неизвестный параметр {head}. {usage}", flush=True)
+            return
+        rest = tail.lstrip()
+    text = rest.replace("\\n", "\n")
+    if not text.strip():
+        print(usage, flush=True)
+        return
+
+    channel = bot.get_channel(cid)
+    if channel is None:
+        try:
+            channel = await bot.fetch_channel(cid)
+        except discord.HTTPException:
+            print(f"⚠ Канал {cid} не найден или нет доступа.", flush=True)
+            return
+    if not hasattr(channel, "send") or getattr(channel, "guild", None) is None:
+        print(f"⚠ В «{channel}» нельзя отправлять сообщения (нужен текстовый канал или ветка сервера).",
+              flush=True)
+        return
+
+    guild = channel.guild
+    if not guild.chunked:
+        try:
+            await guild.chunk()
+        except Exception as e:
+            print(f"⚠ Не удалось полностью загрузить список участников ({e}): теги по имени могут не найтись.",
+                  flush=True)
+
+    text, errors = resolve_mentions(guild, text)
+    if errors:
+        print("Сообщение НЕ отправлено:", flush=True)
+        for e in errors:
+            print(f"   • {e}", flush=True)
+        return
+    if len(text) > SAY_MAX:
+        print(f"⚠ Сообщение слишком длинное: {len(text)} из {SAY_MAX} символов.", flush=True)
+        return
+
+    # Сообщение, на которое отвечаем (ищем в том же канале)
+    target = None
+    if reply_id is not None:
+        try:
+            target = await channel.fetch_message(reply_id)
+        except discord.NotFound:
+            print(f"⚠ Сообщение {reply_id} не найдено в #{getattr(channel, 'name', cid)}. "
+                  "Оно должно быть в том же канале, что указан в команде.", flush=True)
+            return
+        except discord.Forbidden:
+            print("⚠ Нет доступа к истории канала: боту нужно «Читать историю сообщений».", flush=True)
+            return
+        except discord.HTTPException as e:
+            print(f"⚠ Не удалось получить сообщение (HTTP {e.status}): {e.text}", flush=True)
+            return
+
+    try:
+        sent = await channel.send(
+            text,
+            reference=target,
+            allowed_mentions=discord.AllowedMentions(
+                users=True, roles=True, everyone=False, replied_user=ping))
+        extra = f", ответ на сообщение {reply_id} ({target.author.display_name})" if target else ""
+        print(f"✔ Отправлено в «{guild.name}» -> #{getattr(channel, 'name', cid)} "
+              f"(id сообщения {sent.id}{extra}).", flush=True)
+    except discord.Forbidden:
+        print("⚠ Нет прав: боту нужно «Отправлять сообщения» (и «Отправлять сообщения в ветках» для веток).",
+              flush=True)
+    except discord.HTTPException as e:
+        print(f"⚠ Discord отклонил сообщение (HTTP {e.status}): {e.text}", flush=True)
+
 async def handle_console_line(bot: discord.Client, line: str):
+    if line.split(None, 1)[0].lower() == "-say":
+        await say(bot, line)
+        return
     try:
         parts = shlex.split(line)
     except ValueError as e:
