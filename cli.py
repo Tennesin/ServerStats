@@ -11,6 +11,7 @@ from datetime import datetime
 from dataclasses import replace
 import re
 import discord
+import emoji as emoji_lib
 
 from config import (
     DETAIL_LABELS, REACTION_LABELS, SORT_LABELS, STATS_DIR, build_period, collection_dir,
@@ -232,6 +233,23 @@ def resolve_mentions(guild: discord.Guild, text: str):
 
     return _MENTION_RE.sub(repl, text), errors
 
+_EMOJI_RE = re.compile(r"(?<![<\w]):([A-Za-z0-9_]{2,32}):")
+
+def resolve_emoji(guild: discord.Guild, text: str) -> str:
+    """:имя: -> кастомный эмодзи сервера (<:имя:id>) или Unicode-эмодзи по короткому имени.
+    Готовые записи <:имя:id> и неизвестные :имена: остаются без изменений."""
+    own = {}
+    for e in guild.emojis:
+        own.setdefault(e.name.casefold(), e)
+
+    def repl(m):
+        e = own.get(m.group(1).casefold())
+        if e is not None:
+            return str(e)                              # <:имя:id> или <a:имя:id>
+        return emoji_lib.emojize(m.group(0), language="alias")   # не нашли — остаётся как было
+
+    return _EMOJI_RE.sub(repl, text)
+
 async def say(bot: discord.Client, line: str):
     """-say ID_канала [--reply ID_сообщения] [--noping] текст: отправляет сообщение от имени бота."""
     usage = ("Использование: -say ID_канала [--reply ID_сообщения] [--noping] текст сообщения   "
@@ -290,6 +308,7 @@ async def say(bot: discord.Client, line: str):
         for e in errors:
             print(f"   • {e}", flush=True)
         return
+    text = resolve_emoji(guild, text)
     if len(text) > SAY_MAX:
         print(f"⚠ Сообщение слишком длинное: {len(text)} из {SAY_MAX} символов.", flush=True)
         return
@@ -343,6 +362,21 @@ async def handle_console_line(bot: discord.Client, line: str):
             members = f", участников: {fmt_num(g.member_count)}" if g.member_count else ""
             print(f"  {g.id}  {g.name}{members}", flush=True)
         print(f"Всего серверов: {len(bot.guilds)}", flush=True)
+    elif cmd == "-emojis":
+        if not args or not args[0].isdigit():
+            print("Использование: -emojis ID_сервера [часть названия]", flush=True)
+            return
+        g = bot.get_guild(int(args[0]))
+        if g is None:
+            print(f"⚠ Сервер {args[0]} не найден среди серверов бота.", flush=True)
+            return
+        part = args[1].casefold() if len(args) > 1 else ""
+        found = sorted((e for e in g.emojis if part in e.name.casefold()),
+                       key=lambda x: x.name.casefold())
+        for e in found:
+            kind = " (анимированный)" if e.animated else ""
+            print(f"  {e.id}  {e.name}{kind}  ->  {e}", flush=True)
+        print(f"Эмодзи: {len(found)} из {len(g.emojis)}", flush=True)
     elif cmd == "-cancel":
         _cli["cancel"] = True
         for st in running.values():
