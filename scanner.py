@@ -21,7 +21,7 @@ from config import (
     REACTION_REFRESH_DAYS, SPAM_FILTER, SYNC_BATCH, TZ,
     fmt_duration, fmt_list, fmt_num, log, parse_date, today_local,
 )
-from db import get_db, set_meta
+from db import get_db, get_meta, set_meta
 from emoji_utils import normalize_unicode, parse_emoji
 
 # Считаем только обычные сообщения и ответы; системные и сообщения ботов не учитываются.

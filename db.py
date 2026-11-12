@@ -2,6 +2,7 @@
 
 import os
 import sqlite3
+import threading
 
 from config import DB_PATH, TZ_NAME, log
 
@@ -117,34 +118,39 @@ CREATE TABLE IF NOT EXISTS sync_runs (
 """
 
 _con = None
+_con_lock = threading.Lock()
 
 def get_db() -> sqlite3.Connection:
-    """Основное подключение (только из потока бота)."""
+    """Основное подключение. Используется из потока бота; создаётся один раз,
+    даже если первый вызов случился из фонового потока."""
     global _con
     if _con is not None:
         return _con
-    os.makedirs(os.path.dirname(os.path.abspath(DB_PATH)), exist_ok=True)
-    con = sqlite3.connect(DB_PATH)
-    con.execute("PRAGMA journal_mode=WAL")
-    con.execute("PRAGMA synchronous=NORMAL")
-    con.executescript(SCHEMA)
-    row = con.execute("SELECT value FROM meta WHERE key='tz'").fetchone()
-    if row is None:
-        con.execute("INSERT INTO meta VALUES ('tz', ?)", (TZ_NAME,))
-        con.commit()
-    elif row[0] != TZ_NAME:
-        raise SystemExit(
-            f"База создана с TIMEZONE={row[0]}, а сейчас задан {TZ_NAME}. "
-            "Даты в базе хранятся по локальному времени, поэтому смена пояса испортит данные."
-        )
-    _con = con
-    log.info("База данных: %s", DB_PATH)
-    return con
+    with _con_lock:
+        if _con is not None:
+            return _con
+        os.makedirs(os.path.dirname(os.path.abspath(DB_PATH)), exist_ok=True)
+        con = sqlite3.connect(DB_PATH, check_same_thread=False)
+        con.execute("PRAGMA journal_mode=WAL")
+        con.execute("PRAGMA synchronous=NORMAL")
+        con.executescript(SCHEMA)
+        row = con.execute("SELECT value FROM meta WHERE key='tz'").fetchone()
+        if row is None:
+            con.execute("INSERT INTO meta VALUES ('tz', ?)", (TZ_NAME,))
+            con.commit()
+        elif row[0] != TZ_NAME:
+            raise SystemExit(
+                f"База создана с TIMEZONE={row[0]}, а сейчас задан {TZ_NAME}. "
+                "Даты в базе хранятся по локальному времени, поэтому смена пояса испортит данные."
+            )
+        _con = con
+        log.info("База данных: %s", DB_PATH)
+        return con
 
 def new_connection() -> sqlite3.Connection:
     """Отдельное подключение для фонового потока (сборка отчёта). Вызывать после get_db()."""
     get_db()                                  # гарантирует, что база и схема существуют
-    con = sqlite3.connect(DB_PATH)
+    con = sqlite3.connect(DB_PATH, check_same_thread=False)
     con.execute("PRAGMA query_only=ON")
     return con
 
