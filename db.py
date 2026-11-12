@@ -92,6 +92,19 @@ CREATE TABLE IF NOT EXISTS audit_entries (
 );
 CREATE INDEX IF NOT EXISTS ix_audit_day ON audit_entries (guild_id, day);
 
+CREATE TABLE IF NOT EXISTS audit_events (
+    entry_id   INTEGER NOT NULL,
+    guild_id   INTEGER NOT NULL,
+    ts         INTEGER NOT NULL,
+    day        TEXT NOT NULL,
+    kind       TEXT NOT NULL,                 -- admin_grant / admin_revoke / owner_transfer
+    subject_id INTEGER NOT NULL,              -- кому выдали / у кого сняли; при передаче: прежний основатель
+    other_id   INTEGER NOT NULL DEFAULT 0,    -- кто выдал/снял (0 - неизвестно); при передаче: новый основатель
+    role_name  TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (entry_id, kind, role_name)
+);
+CREATE INDEX IF NOT EXISTS ix_audit_events_day ON audit_events (guild_id, day);
+
 CREATE TABLE IF NOT EXISTS sync_runs (
     run_id         INTEGER PRIMARY KEY AUTOINCREMENT,
     guild_id       INTEGER NOT NULL,

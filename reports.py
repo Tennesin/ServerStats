@@ -19,9 +19,14 @@ TOP_USERS = 10
 TABLE_USERS = 15
 MATRIX_USERS = 30
 COMPARE_ROWS = 500
+
 WEEKDAYS = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
 KIND_RU = {"owner": "Основатель", "admin": "Админ"}
-
+EVENT_LABELS = {
+    "admin_grant": "Выдана админская роль",
+    "admin_revoke": "Снята админская роль",
+    "owner_transfer": "Передача прав Основателя",
+}
 AUDIT_STATUS = {
     "off": "журнал аудита не собирался",
     "ok": "собран",
@@ -31,7 +36,6 @@ AUDIT_STATUS = {
 }
 AUDIT_MODE_CODE = {"off": 0, "ok": 1, "denied": 2, "failed": 3, "partial": 4}
 AUDIT_UNKNOWN_ACTOR = "(автор не определён)"
-
 MODE_TITLES = {
     "days": "по дням",
     "weeks": "по неделям (в шапке — понедельник недели)",
@@ -50,6 +54,8 @@ class Agg:
     merged: bool = False
     staff: Optional[object] = None
     staff_servers: dict = field(default_factory=dict)
+    present: set = field(default_factory=set)
+    presence_servers: dict = field(default_factory=dict)
 
     def name_of(self, uid: int) -> str:
         nick = self.names.get(uid, str(uid))
@@ -69,6 +75,14 @@ class Agg:
             return KIND_RU[self.staff.members[uid].kind]
         return ""
 
+    def status_of(self, uid: int) -> str:
+        """Одиночный отчёт: «Присутствует» / «Нет в сервере».
+        Суммарный: список серверов, где человек сейчас есть, иначе «-»."""
+        if self.merged:
+            here = [srv for srv, ids in self.presence_servers.items() if uid in ids]
+            return ", ".join(here) if here else "-"
+        return "Присутствует" if uid in self.present else "Нет в сервере"
+
 def aggregate(params: ScanParams, result: ScanResult) -> Agg:
     per_user: dict[int, dict[date, int]] = defaultdict(dict)
     totals: dict[int, int] = defaultdict(int)
@@ -85,7 +99,8 @@ def aggregate(params: ScanParams, result: ScanResult) -> Agg:
     else:
         order = sorted(totals, key=lambda u: (-totals[u], nm(u), u))
     return Agg(order, totals, per_user, names, result.usernames, result.merged,
-               result.staff, result.staff_servers)
+               result.staff, result.staff_servers,
+               present=result.present, presence_servers=result.presence_servers)
 
 def period_text(params: ScanParams) -> str:
     s = params.start_date.strftime(DATE_FMT) if params.start_date else "с начала истории"
@@ -119,6 +134,40 @@ def staff_rows(agg: Agg, result: ScanResult, srv: str, info):
 
 def staff_label(mb) -> str:
     return f"{mb.name} [{mb.username}]" if mb.username else mb.name
+
+def event_text(e) -> str:
+    base = EVENT_LABELS.get(e.kind, e.kind)
+    return f"{base} «{e.role}»" if e.role else base
+
+def event_person(agg: Agg, result: ScanResult, uid: int) -> str:
+    if not uid:
+        return "-"
+    return clean(result.event_names.get(uid) or agg.names.get(uid) or str(uid))
+
+def write_admin_events(ws, F, row: int, agg: Agg, result: ScanResult, srv: str) -> int:
+    """Список «Событие | Дата | Участник | Участник 2» под блоком сервера. Возвращает следующую строку."""
+    ws.merge_range(row, 0, row, 3, f"Ключевые события администрации: {srv}", F["section"])
+    row += 1
+    if result.audit_mode == "off":
+        ws.write_string(row, 0, "События не собирались: журнал аудита отключён или не собирался.", F["note"])
+        return row + 2
+    events = [e for e in result.admin_events if (not result.merged) or e.server == srv]
+    if not events:
+        ws.write_string(row, 0, "За выбранный период ключевых событий не найдено.", F["note"])
+        return row + 2
+    for c, h in enumerate(["Событие", "Дата", "Участник", "Участник 2"]):
+        ws.write_string(row, c, h, F["head"])
+    row += 1
+    for e in events:
+        ws.write_string(row, 0, clean(event_text(e)), F["text"])
+        ws.write_datetime(row, 1, e.day, F["date"])
+        ws.write_string(row, 2, event_person(agg, result, e.uid), F["text"])
+        ws.write_string(row, 3, event_person(agg, result, e.uid2), F["text"])
+        row += 1
+    ws.write_string(row, 0, "Участник — кому выдали / у кого сняли роль (при передаче — прежний основатель); "
+                            "Участник 2 — кто это сделал (при передаче — новый основатель); «-» — неизвестно.",
+                    F["note"])
+    return row + 2
 
 # ---------- Детализация матрицы ----------
 
@@ -194,7 +243,8 @@ def sheet_summary(wb, F, agg: Agg, params, state, name_w):
         ws.merge_range(0, 0, 0, 8, "⚠ Сбор остановлен вручную: данные НЕПОЛНЫЕ.", F["banner"])
         top = 1
     headers = ["№", "Пользователь", "ID", "Сообщений", "Дней с сообщениями",
-               "Среднее в активный день", "Первая дата", "Последняя дата", "Доля от всех", "Роль"]
+               "Среднее в активный день", "Первая дата", "Последняя дата", "Доля от всех", "Роль",
+               "Статус"]
     for c, h in enumerate(headers):
         ws.write_string(top, c, h, F["head"])
     ws.set_row(top, 32)
@@ -205,6 +255,7 @@ def sheet_summary(wb, F, agg: Agg, params, state, name_w):
     ws.set_column(6, 7, 14)
     ws.set_column(8, 8, 12)
     ws.set_column(9, 9, 28)
+    ws.set_column(10, 10, 40 if agg.merged else 16)
 
     for i, uid in enumerate(order, start=1):
         r = top + i
@@ -220,6 +271,7 @@ def sheet_summary(wb, F, agg: Agg, params, state, name_w):
         ws.write_datetime(r, 7, max(days), F["date"])
         ws.write_number(r, 8, n / grand_total if grand_total else 0, F["pct"])
         ws.write_string(r, 9, agg.role_of(uid), F["text"])
+        ws.write_string(r, 10, clean(agg.status_of(uid)), F["text"])
     if order:
         last_row = top + len(order)
         ws.autofilter(top, 0, last_row, len(headers) - 1)
@@ -506,9 +558,9 @@ def sheet_analytics(wb, F, agg: Agg, result: ScanResult, params: ScanParams, nam
 
 def sheet_staff(wb, F, agg: Agg, result: ScanResult, guild_name: str, name_w):
     ws = wb.add_worksheet("Администрация")
-    ws.set_column(0, 0, max(name_w, 30))
+    ws.set_column(0, 0, max(name_w, 40))
     ws.set_column(1, 1, 21)
-    ws.set_column(2, 2, 14)
+    ws.set_column(2, 2, 30)
     ws.set_column(3, 3, 40)
     ws.set_column(4, 5, 14)
     blocks = staff_blocks(result, guild_name)
@@ -555,6 +607,7 @@ def sheet_staff(wb, F, agg: Agg, result: ScanResult, guild_name: str, name_w):
             ws.write_string(row, 0, "Список участников мог загрузиться не полностью.", F["note"])
             row += 1
         row += 1
+        row = write_admin_events(ws, F, row, agg, result, srv)
 
 def sheet_data(wb, agg: Agg, result: ScanResult):
     """Скрытые машиночитаемые листы для автономного анализатора: полные данные без обрезаний.
@@ -699,6 +752,12 @@ def sheet_data(wb, agg: Agg, result: ScanResult):
             "data_audit_days",
             ["date", "count"],
             ((d.isoformat(), n) for d, n in sorted(result.audit_day.items())),
+        )
+        table(
+            "data_admin_events",
+            ["date", "kind", "role", "who", "who2", "server"],
+            ((e.day.isoformat(), e.kind, e.role, event_person(agg, result, e.uid),
+              event_person(agg, result, e.uid2), e.server) for e in result.admin_events),
         )
 
     if result.user_server:

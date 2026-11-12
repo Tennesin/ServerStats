@@ -521,6 +521,22 @@ def build_server_html(ds, sm, um, sk, linked, emoji_html: str = "") -> str:
                        [[r.server, r.name, S.KIND_RU.get(r.kind, r.kind), r.roles or "—", int(r.n)]
                         for r in s2.itertuples()], num_cols=(4,)))
 
+    if len(ds.admin_events):
+        if not len(ds.staff):
+            b.append(h2("Администрация"))
+        b.append("<h3>Ключевые события администрации</h3>")
+        b.append('<p class="muted">Участник — кому выдали / у кого сняли роль (при передаче — прежний основатель); '
+                 "Участник 2 — кто это сделал (при передаче — новый основатель).</p>")
+        head = ["Событие", "Дата", "Участник", "Участник 2"] + (["Сервер"] if ds.is_merged else [])
+        rows = []
+        for e in ds.admin_events.itertuples():
+            text = S.ADMIN_EVENT_LABELS.get(e.kind, e.kind) + (f" «{e.role}»" if e.role else "")
+            row = [text, f"{e.date:%d.%m.%Y}", e.who, e.who2]
+            if ds.is_merged:
+                row.append(e.server)
+            rows.append(row)
+        b.append(table(head, rows))
+
     # СЗП
     if len(sk):
         b.append(h2("СЗП: значимость пользователей", rel))

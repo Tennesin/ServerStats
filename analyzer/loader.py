@@ -26,6 +26,7 @@ EMOJI_DAY_COLS = ["uid", "date", "n"]
 REACTION_COLS = ["uid", "key", "n"]
 REACTION_MSG_COLS = ["uid", "n"]
 AUDIT_USER_COLS = ["uid", "name", "action", "count", "units"]
+ADMIN_EVENT_COLS = ["date", "kind", "role", "who", "who2", "server"]
 
 class LoaderError(Exception):
     """Файл нельзя использовать (не тот формат, повреждён и т. п.)."""
@@ -86,6 +87,7 @@ class Dataset:
     audit_mode: int = 0             # 1 собран, 2 нет доступа, 3 ошибка, 4 собран не по всем серверам
     audit_users: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=AUDIT_USER_COLS))
     server_start: Optional[date] = None
+    admin_events: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=ADMIN_EVENT_COLS))
 
     @property
     def total_messages(self) -> int:
@@ -367,6 +369,16 @@ def _resolve_server_start(ds: Dataset):
             f"Окно отчёта начинается {ds.declared_start}, а история сервера — с {ds.server_start}: "
             "«дней из N» и постоянство считаются по окну отчёта, а не по всей истории.")
 
+def _load_admin_events(wb, ds: Dataset):
+    """Ключевые события администрации."""
+    rows = []
+    for r in _table(wb, S.SHEET_DATA_ADMIN_EVENTS):
+        d, kind = _to_date(r.get("date")), _s(r.get("kind"))
+        if d and kind:
+            rows.append((d, kind, _s(r.get("role")), _s(r.get("who")) or "-",
+                         _s(r.get("who2")) or "-", _s(r.get("server"))))
+    ds.admin_events = _df(rows, ADMIN_EVENT_COLS)
+
 def load_dataset(path: Path) -> Dataset:
     try:
         wb = load_workbook(path, read_only=True, data_only=True)
@@ -382,6 +394,7 @@ def load_dataset(path: Path) -> Dataset:
         _load_reactions(wb, ds)
         _resolve_server_start(ds)
         _load_audit(wb, ds)
+        _load_admin_events(wb, ds)
         return ds
     finally:
         wb.close()

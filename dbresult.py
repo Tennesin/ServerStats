@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 from config import AUDIT_ENABLED, AUDIT_RETENTION_DAYS, AUDIT_SKIP_ACTIONS, TZ
 from db import get_meta, new_connection
-from scanner import ScanResult, ScanState, _reaction_finish, is_spam_dh
+from scanner import AdminEvent, ScanResult, ScanState, _reaction_finish, is_spam_dh
 
 def build_result(gid: int, params, state: ScanState, rules, ident, spam_rules) -> ScanResult:
     db = new_connection()
@@ -297,3 +297,18 @@ def _load_audit(db, gid, params, main, ident, user_id, info, state, to_day):
             main.audit_first = day
         if main.audit_last is None or day > main.audit_last:
             main.audit_last = day
+
+    # ---- ключевые события администрации ----
+    ev_q = ("SELECT day, kind, role_name, subject_id, other_id FROM audit_events "
+            "WHERE guild_id=? AND day BETWEEN ? AND ? ORDER BY ts, entry_id")
+    for day_s, kind, role, subj, other in db.execute(ev_q, (gid, a_lo, a_hi)):
+        if ident.skip(subj):
+            continue
+        a = ident.canon(subj)
+        b = 0 if (not other or ident.skip(other)) else ident.canon(other)
+        if user_id and user_id not in (a, b):
+            continue
+        main.admin_events.append(AdminEvent(day=to_day(day_s), kind=kind, role=role, uid=a, uid2=b))
+        for raw, c in ((subj, a), (other, b)):
+            if c and raw in info and info[raw][0]:
+                main.event_names.setdefault(c, info[raw][0])

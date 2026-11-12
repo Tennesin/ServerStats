@@ -28,24 +28,24 @@ SHEET_DATA_REACTION_PAIRS = "data_reaction_pairs"
 SHEET_DATA_REACTION_USERS = "data_reaction_users"
 SHEET_DATA_AUDIT_META = "data_audit_meta"
 SHEET_DATA_AUDIT_USERS = "data_audit_users"
+SHEET_DATA_ADMIN_EVENTS = "data_admin_events"
 
 REQUIRED_SHEETS = [SHEET_SUMMARY, SHEET_DAILY, SHEET_INFO]
 
 # Ключи листа «Служебное», которые могут повторяться
 MULTI_KEYS = {"Примечание", "⚠ Внимание"}
-
 KIND_BACK = {"Основатель": "owner", "Админ": "admin"}
-
 MERGED_FILE_PREFIX = "Суммарная"
 MERGED_TITLE_PREFIX = "Суммарно по серверам"
-
 WEEKDAYS = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
-
 KIND_RU = {v: k for k, v in KIND_BACK.items()}
+ADMIN_EVENT_LABELS = {
+    "admin_grant": "Выдана админская роль",
+    "admin_revoke": "Снята админская роль",
+    "owner_transfer": "Передача прав Основателя",
+}
 
 # ---------- Начало истории серверов ----------
-# Копия GUILD_START_DATES из config.py бота. Нужна, чтобы проверять, не короче ли окно отчёта,
-# чем история сервера. Для суммарного файла берётся начало его окна (самая ранняя дата).
 GUILD_START_DATES = {
     1548361478103638068: date(2026, 9, 27),   # Суетологи
     1561089081264316570: date(2026, 10, 18),  # Комитет

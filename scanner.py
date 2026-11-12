@@ -83,6 +83,15 @@ class StaffInfo:
     partial: bool = False                                # список участников мог загрузиться не полностью
 
 @dataclass
+class AdminEvent:
+    day: date
+    kind: str                  # "admin_grant" / "admin_revoke" / "owner_transfer"
+    role: str = ""
+    uid: int = 0               # «Участник»
+    uid2: int = 0              # «Участник 2» (0 - нет)
+    server: str = ""           # заполняется только в суммарном файле
+
+@dataclass
 class ScanResult:
     user_day: dict = field(default_factory=lambda: defaultdict(int))      # (uid, date) -> n
     user_channel: dict = field(default_factory=lambda: defaultdict(int))  # (uid, channel_id) -> n
@@ -129,6 +138,10 @@ class ScanResult:
     prev: Optional["ScanResult"] = None                                   # предыдущий период
     staff: Optional["StaffInfo"] = None                                   # администрация сервера
     staff_servers: dict = field(default_factory=dict)                     # сервер -> StaffInfo (только в сумме)
+    admin_events: list = field(default_factory=list)                      # список AdminEvent
+    event_names: dict = field(default_factory=dict)                       # uid -> ник участников событий
+    present: set = field(default_factory=set)                             # uid людей, которые сейчас на сервере
+    presence_servers: dict = field(default_factory=dict)                  # сервер -> set uid (только в сумме)
 
     @property
     def total(self) -> int:
@@ -524,6 +537,20 @@ async def collect_staff(guild: discord.Guild, state: ScanState,
             "Роли из ADMIN_ROLES не найдены на сервере: " + ", ".join(info.unmatched_roles)
         )
     return info
+
+async def collect_presence(guild: discord.Guild, state: ScanState,
+                           ident: IdentityRules = NO_IDENTITY) -> set:
+    """ID (канонические) всех, кто сейчас состоит на сервере."""
+    if not guild.chunked:
+        try:
+            await guild.chunk()
+        except Exception as e:
+            log.warning("[%s] Не удалось загрузить список участников: %s", guild.name, e)
+    if guild.member_count and len(guild.members) < guild.member_count:
+        state.notes.append(
+            f"Статус «Присутствует / Нет в сервере»: в кэше {len(guild.members)} из "
+            f"{guild.member_count} участников, статус мог определиться неточно.")
+    return {ident.canon(m.id) for m in guild.members}
 
 # ---------- Антиспам-фильтры эмодзи ----------
 
@@ -1038,8 +1065,7 @@ async def sync_guild(guild: discord.Guild, params: ScanParams, bot_user_id: int,
 # ---------- Журнал аудита ----------
 
 def _audit_units(entry, code: str) -> int:
-    """Сколько объектов затронула запись. Discord склеивает подряд идущие удаления сообщений
-    в одну запись с полем count, поэтому для них берём count; для остальных действий — 1."""
+    """Сколько объектов затронула запись."""
     extra = getattr(entry, "extra", None)
     if code in ("message_delete", "message_bulk_delete", "member_disconnect", "member_move"):
         raw = getattr(extra, "count", None)
@@ -1052,10 +1078,51 @@ def _audit_units(entry, code: str) -> int:
     except (TypeError, ValueError):
         return 1
 
+def _admin_role_hit(guild_id: int, role) -> bool:
+    """Роль входит в ADMIN_ROLES сервера (по ID или по названию без учёта регистра)."""
+    rid = getattr(role, "id", None)
+    name = norm_name(getattr(role, "name", "") or "")
+    for item in ADMIN_ROLES.get(guild_id, ()):
+        if isinstance(item, int) or looks_like_id(str(item)):
+            if rid is not None and int(item) == int(rid):
+                return True
+        elif name and norm_name(item) == name:
+            return True
+    return False
+
+def _admin_events(entry, code: str, gid: int, actor_id: int, ts: int, day_s: str):
+    """Из одной записи журнала -> (строки для audit_events, люди для users)."""
+    rows, people = [], []
+
+    def person(obj) -> int:
+        oid = int(getattr(obj, "id", 0) or 0)
+        nm = getattr(obj, "display_name", None) or getattr(obj, "name", None)
+        if oid and nm:
+            people.append((gid, oid, str(nm), str(getattr(obj, "name", "") or ""),
+                           int(bool(getattr(obj, "bot", False)))))
+        return oid
+
+    if code == "member_role_update":
+        tid = person(getattr(entry, "target", None))
+        if tid:
+            # в discord.py: after.roles - выданные роли, before.roles - снятые
+            for kind, roles in (("admin_grant", getattr(entry.after, "roles", None) or []),
+                                ("admin_revoke", getattr(entry.before, "roles", None) or [])):
+                for role in roles:
+                    if _admin_role_hit(gid, role):
+                        rname = str(getattr(role, "name", None) or getattr(role, "id", "") or "")
+                        rows.append((entry.id, gid, ts, day_s, kind, tid, actor_id, rname))
+    elif code == "guild_update":
+        new = getattr(entry.after, "owner", None)
+        if new is not None:
+            new_id = person(new)
+            old_id = person(getattr(entry.before, "owner", None)) or actor_id
+            if new_id and old_id and new_id != old_id:
+                rows.append((entry.id, gid, ts, day_s, "owner_transfer", old_id, new_id, ""))
+    return rows, people
+
 async def collect_audit(guild: discord.Guild, state: ScanState):
-    """Дописывает в базу новые записи журнала аудита (с последней сохранённой записи).
-    Игнор, слияние и AUDIT_SKIP_ACTIONS применяются позже, при чтении из базы.
-    Исключений наружу не бросает: статус пишется в meta, примечания — в state.notes."""
+    """Дописывает в базу новые записи журнала аудита."""
     if not AUDIT_ENABLED:
         return
     db = get_db()
@@ -1068,26 +1135,31 @@ async def collect_audit(guild: discord.Guild, state: ScanState):
 
     row = db.execute("SELECT MAX(entry_id) FROM audit_entries WHERE guild_id=?", (gid,)).fetchone()
     last_id = row[0] if row and row[0] else 0
+    # Первый сбор после появления audit_events: перечитываем доступный журнал с начала.
+    # audit_entries при этом не дублируются (INSERT OR IGNORE), а события администрации восстанавливаются.
+    backfill = get_meta(db, f"audit_events_ready:{gid}") != "1"
     kwargs = {"limit": None, "oldest_first": True}
-    if last_id:
+    if last_id and not backfill:
         kwargs["after"] = discord.Object(id=last_id)
 
     rows: list = []
     people: list = []
+    events: list = []
     stored = 0
     truncated = False
     status = "ok"
     cancelled = False
 
     def flush():
-        nonlocal rows, people
-        if rows or people:
+        nonlocal rows, people, events
+        if rows or people or events:
             with db:
                 db.executemany("INSERT OR IGNORE INTO audit_entries VALUES (?,?,?,?,?,?,?)", rows)
+                db.executemany("INSERT OR IGNORE INTO audit_events VALUES (?,?,?,?,?,?,?,?)", events)
                 db.executemany(
                     "INSERT OR IGNORE INTO users (guild_id,uid,display_name,username,is_bot) VALUES (?,?,?,?,?)",
                     people)
-        rows, people = [], []
+        rows, people, events = [], [], []
 
     state.in_progress[-1] = "журнал аудита"
     try:
@@ -1114,9 +1186,12 @@ async def collect_audit(guild: discord.Guild, state: ScanState):
                 if nick:
                     people.append((gid, uid, str(nick), str(getattr(user_obj, "name", "") or ""),
                                    int(bool(getattr(user_obj, "bot", False)))))
-            rows.append((entry.id, gid, int(entry.created_at.timestamp()),
-                         entry.created_at.astimezone(TZ).date().isoformat(),
-                         code, uid, _audit_units(entry, code)))
+            ts = int(entry.created_at.timestamp())
+            day_s = entry.created_at.astimezone(TZ).date().isoformat()
+            rows.append((entry.id, gid, ts, day_s, code, uid, _audit_units(entry, code)))
+            ev_rows, ev_people = _admin_events(entry, code, gid, uid, ts, day_s)
+            events.extend(ev_rows)
+            people.extend(ev_people)
             stored += 1
             if len(rows) >= 1000:
                 flush()
@@ -1139,15 +1214,15 @@ async def collect_audit(guild: discord.Guild, state: ScanState):
         return                                   # статус не меняем: следующий сбор продолжит с последней записи
     set_meta(db, f"audit_status:{gid}", status)
     set_meta(db, f"audit_truncated:{gid}", "1" if truncated else "0")
+    if status == "ok" and not truncated:
+        set_meta(db, f"audit_events_ready:{gid}", "1")   # перечитывание для событий больше не нужно
     if status == "ok" and not db.execute("SELECT 1 FROM meta WHERE key=?", (f"audit_since:{gid}",)).fetchone():
         set_meta(db, f"audit_since:{gid}", today_local().isoformat())
 
 async def collect_audit_live(guild: discord.Guild, params: ScanParams,
                              state: ScanState, result: ScanResult,
                              ident: IdentityRules = NO_IDENTITY):
-    """Прежняя версия (режим --live): читает журнал аудита за период и складывает счётчики в result.
-    Никогда не бросает исключений наружу: при проблемах ставит статус в result.audit_mode
-    и пишет примечание в state.notes (оно попадёт на лист «Служебное»)."""
+    """Прежняя версия (режим --live): читает журнал аудита за период и складывает счётчики в result."""
     result.audit_mode = "off"
     if not AUDIT_ENABLED:
         return
@@ -1287,6 +1362,7 @@ async def scan_guild_live(guild: discord.Guild, params: ScanParams, bot_user_id:
     if not state.cancelled:
         await collect_audit_live(guild, params, state, result, ident)
     result.staff = staff
+    result.present = await collect_presence(guild, state, ident)
     return result
 
 async def scan_guild(guild: discord.Guild, params: ScanParams, bot_user_id: int,
@@ -1317,6 +1393,7 @@ async def scan_guild(guild: discord.Guild, params: ScanParams, bot_user_id: int,
                 "данные по эмодзи пустые, это не значит, что их никто не использует."
             )
         result.staff = await collect_staff(guild, state, ident)
+        result.present = await collect_presence(guild, state, ident)
         return result
     finally:
         progress_task.cancel()
@@ -1395,6 +1472,10 @@ def _merge_into(dst: ScanResult, src: ScanResult, server: Optional[str]):
         dst.audit_user_units[key] += v
     for key, v in src.audit_day.items():
         dst.audit_day[key] += v
+    for e in src.admin_events:
+        dst.admin_events.append(replace(e, server=server or ""))
+    for uid, nm in src.event_names.items():
+        dst.event_names.setdefault(uid, nm)
     for uid, nm in src.audit_names.items():
         dst.audit_names.setdefault(uid, nm)
     dst.audit_total += src.audit_total
@@ -1439,6 +1520,7 @@ def merge_results(results):
         _merge_into(merged, r, server)
         if r.staff is not None:
             merged.staff_servers[server] = r.staff
+            merged.presence_servers[server] = set(r.present)
         if have_prev:
             _merge_into(merged.prev, r.prev, None)
         total.total_channels += s.total_channels
