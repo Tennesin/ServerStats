@@ -1,16 +1,14 @@
 """Построение отчётов (xlsx и txt) из ScanResult. С Discord напрямую не работает."""
-
 import io
 from typing import Optional
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
-
 import xlsxwriter
 
 from config import (
     AUDIT_LABELS, AUDIT_RETENTION_DAYS, DATE_FMT, MAX_LIST_ROWS, MAX_MATRIX_COLS, NAME_WIDTH,
-    REACTION_LABELS, SORT_LABELS, TZ, TZ_NAME, clean, fit_name, fmt_list, fmt_num,
+    PERMISSION_LABELS, REACTION_LABELS, SORT_LABELS, TZ, TZ_NAME, clean, fit_name, fmt_list, fmt_num,
 )
 from scanner import ScanParams, ScanResult, ScanState, chan_label
 
@@ -609,6 +607,143 @@ def sheet_staff(wb, F, agg: Agg, result: ScanResult, guild_name: str, name_w):
         row += 1
         row = write_admin_events(ws, F, row, agg, result, srv)
 
+def roles_blocks(result: ScanResult, guild_name: str) -> list:
+    """[(название сервера, RolesInfo)] — один блок для сервера или по блоку на каждый в сумме."""
+    if result.roles_servers:
+        return list(result.roles_servers.items())
+    return [(guild_name, result.roles)] if result.roles else []
+
+def role_flags(r) -> str:
+    bits = []
+    if r.hoist:
+        bits.append("показывается отдельной группой")
+    if r.mentionable:
+        bits.append("можно упоминать")
+    if r.managed:
+        bits.append("управляется интеграцией или ботом")
+    return "; ".join(bits) or "—"
+
+def sheet_roles(wb, F, result: ScanResult, guild_name: str):
+    """Лист «Роли»: люди и их роли, боты и их роли, таблица «Роли / Цвет»."""
+    ws = wb.add_worksheet("Роли")
+    ws.set_column(0, 0, 36)
+    ws.set_column(1, 1, 28)
+    ws.set_column(2, 2, 21)
+    ws.set_column(3, 3, 14)
+    ws.set_column(4, 4, 80)
+    blocks = roles_blocks(result, guild_name)
+    if not blocks:
+        ws.write_string(0, 0, "Данные о ролях не собраны.")
+        return
+
+    swatches: dict = {}                       # цвет -> формат ячейки с заливкой
+
+    def swatch(value: int):
+        fmt = swatches.get(value)
+        if fmt is None:
+            r, g, b = (value >> 16) & 255, (value >> 8) & 255, value & 255
+            dark = (0.299 * r + 0.587 * g + 0.114 * b) < 150
+            fmt = swatches[value] = wb.add_format({
+                "bg_color": f"#{value:06X}", "font_color": "#FFFFFF" if dark else "#000000",
+                "border": 1, "border_color": "#D9D9D9", "valign": "vcenter", "align": "center"})
+        return fmt
+
+    row = 0
+
+    def member_table(title: str, members: dict, empty_text: str):
+        nonlocal row
+        ws.merge_range(row, 0, row, 4, title, F["section"])
+        row += 1
+        if not members:
+            ws.write_string(row, 0, empty_text, F["note"])
+            row += 2
+            return
+        for c, h in enumerate(["Ник на сервере", "Оригинальный ник", "ID", "Ролей", "Роли"]):
+            ws.write_string(row, c, h, F["head"])
+        row += 1
+        items = sorted(members.items(), key=lambda kv: (-kv[1].top_pos, kv[1].name.casefold()))
+        for uid, mb in items:
+            ws.write_string(row, 0, clean(mb.name), F["text"])
+            ws.write_string(row, 1, clean(mb.username), F["text"])
+            ws.write_string(row, 2, str(uid), F["text"])
+            ws.write_number(row, 3, len(mb.roles), F["int"])
+            ws.write_string(row, 4, clean(", ".join(mb.roles) or "—"), F["text"])
+            row += 1
+        row += 1
+
+    for srv, info in blocks:
+        ws.merge_range(row, 0, row, 4, f"Сервер: {srv}", F["bold"])
+        row += 1
+        if info.partial:
+            ws.write_string(row, 0, "Список участников мог загрузиться не полностью.", F["note"])
+            row += 1
+
+        member_table(f"1. Пользователи и их роли ({len(info.members)})", info.members,
+                     "Пользователей не найдено.")
+        member_table(f"2. Боты на сервере ({len(info.bots)})", info.bots,
+                     "Ботов на сервере нет. Их сообщения в статистику не входят.")
+
+        ws.merge_range(row, 0, row, 4, f"3. Роли / Цвет ({len(info.roles)})", F["section"])
+        row += 1
+        for c, h in enumerate(["Роль", "Цвет (HEX)", "ID роли", "Участников (с ботами)", "Особенности"]):
+            ws.write_string(row, c, h, F["head"])
+        ws.set_row(row, 32)
+        row += 1
+        for r in info.roles:                      # порядок как в Discord: сверху самые высокие
+            ws.write_string(row, 0, clean(r.name), F["text"])
+            if r.color:
+                ws.write_string(row, 1, f"#{r.color:06X}", swatch(r.color))
+            else:
+                ws.write_string(row, 1, "— (не задан)", F["cell"])
+            ws.write_string(row, 2, str(r.id), F["text"])
+            ws.write_number(row, 3, r.members, F["int"])
+            ws.write_string(row, 4, role_flags(r), F["text"])
+            row += 1
+        ws.write_string(row, 0, "Роли идут сверху вниз по иерархии Discord. Роль @everyone не показана.",
+                        F["note"])
+        row += 3
+
+def sheet_role_perms(wb, F, result: ScanResult, guild_name: str):
+    """Лист «Права ролей»: матрица «Роли / Права», + — право есть, - — нет."""
+    ws = wb.add_worksheet("Права ролей")
+    ws.set_column(0, 0, 36)
+    ws.set_column(1, 120, 4.6)
+    blocks = roles_blocks(result, guild_name)
+    if not blocks:
+        ws.write_string(0, 0, "Данные о ролях не собраны.")
+        return
+
+    border = {"border": 1, "border_color": "#D9D9D9", "align": "center", "valign": "vcenter"}
+    head_rot = wb.add_format({"bold": True, "bg_color": "#1F4E78", "font_color": "#FFFFFF", "border": 1,
+                              "align": "center", "valign": "bottom", "rotation": 90})
+    plus = wb.add_format({**border, "bold": True, "font_color": "#1E8E3E"})
+    minus = wb.add_format({**border, "font_color": "#B0B0B0"})
+
+    row = 0
+    for srv, info in blocks:
+        ws.merge_range(row, 0, row, 8, f"Сервер: {srv}", F["section"])
+        row += 1
+        names = info.perm_order
+        ws.write_string(row, 0, "Роль / Права", F["head"])
+        for c, code in enumerate(names, start=1):
+            ws.write_string(row, c, PERMISSION_LABELS.get(code, code), head_rot)
+        ws.set_row(row, 175)
+        row += 1
+        rows = list(info.roles) + ([info.everyone] if info.everyone else [])
+        for r in rows:
+            label = "@everyone (базовые права)" if r is info.everyone else r.name
+            ws.write_string(row, 0, clean(label), F["text"])
+            for c, code in enumerate(names, start=1):
+                if code in r.perms:
+                    ws.write_string(row, c, "+", plus)
+                else:
+                    ws.write_string(row, c, "-", minus)
+            row += 1
+        ws.write_string(row, 0, "+ право включено у роли, - нет. Роль с правом «Администратор» "
+                                "фактически имеет все права, но здесь отмечены только явно включённые.",
+                        F["note"])
+        row += 3
+
 def sheet_data(wb, agg: Agg, result: ScanResult):
     """Скрытые машиночитаемые листы для автономного анализатора: полные данные без обрезаний.
     ID пишутся строкой: числа в Excel теряют точность после 15 цифр."""
@@ -978,6 +1113,8 @@ def build_xlsx(guild_name: str, params: ScanParams, state: ScanState, result: Sc
     truncated = sheet_daily(wb, F, agg, name_w)
     sheet_analytics(wb, F, agg, result, params, name_w)
     sheet_staff(wb, F, agg, result, guild_name, name_w)
+    sheet_roles(wb, F, result, guild_name)
+    sheet_role_perms(wb, F, result, guild_name)
     if result.audit_mode != "off":
         sheet_audit(wb, F, agg, result, params, name_w)
     sheet_info(wb, F, guild_name, params, state, matrix_note, truncated, agg.merged)

@@ -17,8 +17,8 @@ import discord
 from config import (
     ADMIN_ROLES, AUDIT_ENABLED, AUDIT_MAX_ENTRIES, AUDIT_RETENTION_DAYS, AUDIT_SKIP_ACTIONS,
     CONCURRENCY, DATE_FMT, EXCLUDE_FILE, GUILD_START_DATES, IGNORED_CHATS, IGNORE_USERS,
-    MERGE_USERS, MIN_START_DATE, PROGRESS_INTERVAL, REACTION_MAX_REQUESTS, REACTION_MAX_USERS,
-    REACTION_REFRESH_DAYS, SPAM_FILTER, SYNC_BATCH, TZ,
+    MERGE_USERS, MIN_START_DATE, PERMISSION_LABELS, PROGRESS_INTERVAL, REACTION_MAX_REQUESTS,
+    REACTION_MAX_USERS, REACTION_REFRESH_DAYS, SPAM_FILTER, SYNC_BATCH, TZ,
     fmt_duration, fmt_list, fmt_num, log, parse_date, today_local,
 )
 from db import get_db, get_meta, set_meta
@@ -83,6 +83,34 @@ class StaffInfo:
     partial: bool = False                                # список участников мог загрузиться не полностью
 
 @dataclass
+class RoleInfo:
+    id: int
+    name: str
+    color: int = 0                 # 0 — цвет не задан (обычный цвет Discord)
+    position: int = 0              # чем больше, тем выше в иерархии
+    hoist: bool = False            # показывается отдельной группой в списке участников
+    mentionable: bool = False
+    managed: bool = False          # создана интеграцией или ботом
+    perms: frozenset = frozenset() # имена включённых прав
+    members: int = 0               # сколько участников (вместе с ботами) имеют эту роль
+
+@dataclass
+class MemberRoles:
+    name: str                      # ник на сервере
+    username: str                  # оригинальный ник (логин)
+    roles: list = field(default_factory=list)   # названия ролей от высшей к низшей
+    top_pos: int = -1              # позиция высшей роли (для сортировки)
+
+@dataclass
+class RolesInfo:
+    roles: list = field(default_factory=list)     # RoleInfo без @everyone, от высшей к низшей
+    everyone: Optional[RoleInfo] = None           # базовые права @everyone
+    members: dict = field(default_factory=dict)   # uid -> MemberRoles (люди)
+    bots: dict = field(default_factory=dict)      # uid -> MemberRoles (боты)
+    perm_order: list = field(default_factory=list)  # коды прав в порядке столбцов
+    partial: bool = False                         # список участников мог загрузиться не полностью
+
+@dataclass
 class AdminEvent:
     day: date
     kind: str                  # "admin_grant" / "admin_revoke" / "owner_transfer"
@@ -142,6 +170,8 @@ class ScanResult:
     event_names: dict = field(default_factory=dict)                       # uid -> ник участников событий
     present: set = field(default_factory=set)                             # uid людей, которые сейчас на сервере
     presence_servers: dict = field(default_factory=dict)                  # сервер -> set uid (только в сумме)
+    roles: Optional["RolesInfo"] = None                                   # роли, права, боты сервера
+    roles_servers: dict = field(default_factory=dict)                     # сервер -> RolesInfo (только в сумме)
 
     @property
     def total(self) -> int:
@@ -552,6 +582,49 @@ async def collect_presence(guild: discord.Guild, state: ScanState,
             f"{guild.member_count} участников, статус мог определиться неточно.")
     return {ident.canon(m.id) for m in guild.members}
 
+async def collect_roles(guild: discord.Guild, state: ScanState,
+                        ident: IdentityRules = NO_IDENTITY) -> RolesInfo:
+    """Снимок ролей сервера: у кого какие роли, цвета и права ролей, а также список ботов."""
+    info = RolesInfo()
+
+    if not guild.chunked:
+        try:
+            await guild.chunk()
+        except Exception as e:
+            log.warning("[%s] Не удалось загрузить список участников: %s", guild.name, e)
+    if guild.member_count and len(guild.members) < guild.member_count:
+        info.partial = True
+        state.notes.append(
+            f"Роли: в кэше {len(guild.members)} из {guild.member_count} участников — "
+            "списки людей и ботов с ролями могут быть неполными.")
+
+    counts: dict = defaultdict(int)
+    for m in guild.members:
+        if ident.skip(m.id):
+            continue
+        roles = sorted((r for r in m.roles if not r.is_default()), key=lambda r: -r.position)
+        for r in roles:
+            counts[r.id] += 1
+        row = MemberRoles(m.display_name, m.name, [r.name for r in roles],
+                          roles[0].position if roles else -1)
+        (info.bots if m.bot else info.members)[m.id] = row
+
+    all_codes = [name for name, _v in discord.Permissions.none()]
+    info.perm_order = ([c for c in PERMISSION_LABELS if c in all_codes]
+                       + sorted(c for c in all_codes if c not in PERMISSION_LABELS))
+
+    for r in sorted(guild.roles, key=lambda x: -x.position):
+        ri = RoleInfo(
+            id=r.id, name=r.name, color=r.color.value, position=r.position,
+            hoist=r.hoist, mentionable=r.mentionable, managed=r.managed,
+            perms=frozenset(name for name, value in r.permissions if value),
+            members=counts.get(r.id, 0))
+        if r.is_default():
+            info.everyone = ri
+        else:
+            info.roles.append(ri)
+    return info
+
 # ---------- Антиспам-фильтры эмодзи ----------
 
 def build_spam_rules(guild_id: int) -> dict:
@@ -609,8 +682,7 @@ def filter_emoji(found: list, local: datetime, rules: Optional[dict], state: Sca
 # ---------- Реакции (режим --live) ----------
 
 def reaction_key(emoji):
-    """(ключ, имя, анимированный, id кастомного). Ключи те же, что у parse_emoji:
-    "c:<id>" для кастомных, "u:<символ>" для Unicode (с той же нормализацией)."""
+    """(ключ, имя, анимированный, id кастомного)."""
     cid = getattr(emoji, "id", None)
     if cid:
         return (f"c:{cid}", str(getattr(emoji, "name", "") or ""),
@@ -622,9 +694,7 @@ async def collect_reactions(m: discord.Message, uid: int, target: ScanResult, ma
                             state: ScanState, params: ScanParams, own_emoji_ids,
                             spam_rules: Optional[dict] = None,
                             ident: IdentityRules = NO_IDENTITY):
-    """Реакции под одним сообщением (автор uid уже прошёл общие фильтры).
-    counts — берём только счётчики; full — читаем, кто поставил, и отсеиваем ботов и самореакции.
-    Реакции из ручного антиспам-окна (по времени сообщения) пропускаются."""
+    """Реакции под одним сообщением (автор uid уже прошёл общие фильтры)."""
     full = params.reactions == "full"
     state.reaction_msgs += 1
     got_any = False
@@ -1363,6 +1433,7 @@ async def scan_guild_live(guild: discord.Guild, params: ScanParams, bot_user_id:
         await collect_audit_live(guild, params, state, result, ident)
     result.staff = staff
     result.present = await collect_presence(guild, state, ident)
+    result.roles = await collect_roles(guild, state, ident)
     return result
 
 async def scan_guild(guild: discord.Guild, params: ScanParams, bot_user_id: int,
@@ -1394,6 +1465,7 @@ async def scan_guild(guild: discord.Guild, params: ScanParams, bot_user_id: int,
             )
         result.staff = await collect_staff(guild, state, ident)
         result.present = await collect_presence(guild, state, ident)
+        result.roles = await collect_roles(guild, state, ident)
         return result
     finally:
         progress_task.cancel()
@@ -1521,6 +1593,8 @@ def merge_results(results):
         if r.staff is not None:
             merged.staff_servers[server] = r.staff
             merged.presence_servers[server] = set(r.present)
+        if r.roles is not None:
+            merged.roles_servers[server] = r.roles
         if have_prev:
             _merge_into(merged.prev, r.prev, None)
         total.total_channels += s.total_channels
