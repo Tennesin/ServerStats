@@ -22,6 +22,7 @@ from scanner import (
     ScanParams, ScanState, background_tasks, merge_results, running, scan_guild,
     guild_start_date, params_for_guild, sync_only,
 )
+from cleaner import USAGE as CLEAR_USAGE, parse_clear, run_clear
 
 VALUE_OPTS = {"period", "last", "start", "end", "exclude", "detail", "sort", "reactions"}
 FLAG_OPTS = {"compare", "nosync", "live"}
@@ -344,6 +345,16 @@ async def say(bot: discord.Client, line: str):
     except discord.HTTPException as e:
         print(f"⚠ Discord отклонил сообщение (HTTP {e.status}): {e.text}", flush=True)
 
+async def run_clear_task(bot: discord.Client, params):
+    """Очистка в фоне (чтобы консоль принимала -cancel). busy уже выставлен вызывающим."""
+    _cli["cancel"] = False
+    try:
+        await run_clear(bot, params, lambda: _cli["cancel"])
+    except Exception:
+        log.exception("Очистка сообщений завершилась ошибкой")
+    finally:
+        _cli["busy"] = False
+
 async def handle_console_line(bot: discord.Client, line: str):
     if line.split(None, 1)[0].lower() == "-say":
         await say(bot, line)
@@ -382,6 +393,19 @@ async def handle_console_line(bot: discord.Client, line: str):
         for st in running.values():
             st.cancelled = True
         print("Останавливаю… Сохраню то, что успел собрать.", flush=True)
+    elif cmd == "-clear":
+        if _cli["busy"]:
+            print("Пакетная операция уже идёт. Дождитесь окончания или введите -cancel.", flush=True)
+            return
+        try:
+            params = parse_clear(args)
+        except ValueError as e:
+            print(f"Ошибка: {e}", flush=True)
+            return
+        _cli["busy"] = True
+        task = asyncio.create_task(run_clear_task(bot, params))
+        background_tasks.add(task)
+        task.add_done_callback(background_tasks.discard)
     elif cmd == "-sync":
         if _cli["busy"]:
             print("Пакетная операция уже идёт. Дождитесь окончания или введите -cancel.", flush=True)
