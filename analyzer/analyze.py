@@ -3,7 +3,6 @@
 Запуск:  python analyze.py "путь_к_папке_с_xlsx"
 (этап 1: чтение, проверка и сводка; отчёты появятся на следующих этапах)
 """
-
 import argparse
 import sys
 import re
@@ -12,9 +11,11 @@ import pandas as pd
 from pathlib import Path
 
 import settings as S
-from loader import Dataset, LoaderError, discover, load_dataset
-from metrics import (TREND_WINDOW, calendar_days, emoji_server_metrics, emoji_user_metrics,
-                     reaction_server_metrics, reaction_user_metrics, server_metrics, user_metrics)
+from loader import Dataset, LoaderError, discover, load_dataset, load_db
+from metrics import (
+    TREND_WINDOW, calendar_days, emoji_server_metrics, emoji_user_metrics,
+    reaction_server_metrics, reaction_user_metrics, server_metrics, user_metrics
+)
 from report_emoji import EmojiImages, build_server_emoji_html, build_user_emoji_html
 from report_reactions import build_server_reactions_html, build_user_reactions_html
 from report_html import build_server_html, build_user_html
@@ -113,14 +114,61 @@ def make_reports(ds: Dataset, out_dir: Path, args):
         build_server_html(ds, sm, um, sk, linked, server_emoji), encoding="utf-8")
     return folder, {"ds": ds, "sm": sm, "um": um, "sk": sk, "em": em, "rx": rx}
 
+def _from_xlsx(path_text: str):
+    """Устаревший режим: возвращает (список Dataset, папка вывода по умолчанию)."""
+    root = Path(path_text).expanduser()
+    if not root.exists():
+        raise LoaderError(f"Путь не найден: {root}")
+    files, chosen = discover(root)
+    if chosen:
+        print(f"В указанной папке нет xlsx; взята самая свежая вложенная: {chosen}")
+    if not files:
+        raise LoaderError("xlsx-файлы не найдены.")
+    print(f"Найдено файлов: {len(files)}")
+    loaded = []
+    for p in files:
+        try:
+            loaded.append(load_dataset(p))
+        except LoaderError as e:
+            print(f"\n[пропущен] {p.name}: {e}")
+    return loaded, files[0].parent / "analysis"
+
+def _from_db(args):
+    """Основной режим: чтение из stats.db. Возвращает (список Dataset, папка вывода по умолчанию)."""
+    period = args.period
+    if args.last:
+        if period:
+            raise LoaderError("Укажите либо --period, либо --last.")
+        last = args.last.strip().lower()
+        period = last if last.startswith("last") else "last" + last
+    tokens = [t for t in args.servers.replace(",", " ").split() if t]
+    if not tokens or any(t.lower() == "all" for t in tokens):
+        ids = None
+    elif all(t.isdigit() for t in tokens):
+        ids = [int(t) for t in tokens]
+    else:
+        raise LoaderError("--servers: ID серверов через запятую или all.")
+    loaded, folder = load_db(args.db, ids, period, args.start, args.end, args.compare, args.reactions)
+    return loaded, Path(__file__).resolve().parent / "analysis" / folder
+
 def main() -> int:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-    ap = argparse.ArgumentParser(description="Автономный анализатор отчётов бота")
-    ap.add_argument("path", help="папка с xlsx-файлами (или один файл)")
+    ap = argparse.ArgumentParser(description="Автономный анализатор данных бота статистики")
+    ap.add_argument("path", nargs="?",
+                    help="(устаревший режим) папка с xlsx-файлами или один файл; без него данные читаются из БД")
+    ap.add_argument("--db", help="путь к stats.db (по умолчанию — база рядом с ботом)")
+    ap.add_argument("--servers", default="all", help="ID серверов через запятую или all (по умолчанию all)")
+    ap.add_argument("--period", help="пресет периода бота: prev-week, prev-month, last30d и т. д.")
+    ap.add_argument("--last", help="сокращение: 45d = last45d (d, w, m, y)")
+    ap.add_argument("--start", help="дата начала дд.мм.гггг")
+    ap.add_argument("--end", help="дата конца дд.мм.гггг (по умолчанию вчера)")
+    ap.add_argument("--compare", action="store_true", help="сравнить с предыдущим периодом такой же длины")
+    ap.add_argument("--reactions", choices=["auto", "counts", "full"], default="auto",
+                    help="режим реакций: auto — как собрано в базе")
     ap.add_argument("--top", type=int, default=10, help="сколько пользователей показать в топе (0 — не показывать)")
-    ap.add_argument("--out", help="куда сохранять отчёты (по умолчанию — папка analysis рядом с xlsx)")
+    ap.add_argument("--out", help="куда сохранять отчёты (по умолчанию — analysis/<период> рядом со скриптом)")
     ap.add_argument("--no-reports", action="store_true", help="только сводка в терминале, без HTML и xlsx")
     ap.add_argument("--no-avatars", action="store_true",
                     help="не скачивать аватарки (отчёты строятся без интернета)")
@@ -132,27 +180,15 @@ def main() -> int:
                     help="предел числа индивидуальных отчётов на файл")
     args = ap.parse_args()
 
-    root = Path(args.path).expanduser()
-    if not root.exists():
-        print(f"Путь не найден: {root}")
+    try:
+        loaded, default_out = _from_xlsx(args.path) if args.path else _from_db(args)
+    except LoaderError as e:
+        print(f"Ошибка: {e}")
+        return 1
+    if not loaded:
         return 1
 
-    files, chosen = discover(root)
-    if chosen:
-        print(f"В указанной папке нет xlsx; взята самая свежая вложенная: {chosen}")
-    if not files:
-        print("xlsx-файлы не найдены.")
-        return 1
-
-    print(f"Найдено файлов: {len(files)}")
-    loaded = []
-    for p in files:
-        try:
-            loaded.append(load_dataset(p))
-        except LoaderError as e:
-            print(f"\n[пропущен] {p.name}: {e}")
-
-    out_dir = Path(args.out).expanduser() if args.out else files[0].parent / "analysis"
+    out_dir = Path(args.out).expanduser() if args.out else default_out
     results = []
     for ds in loaded:
         describe(ds)
@@ -164,7 +200,7 @@ def main() -> int:
             results.append(item)
             print(f"\n  HTML-отчёт: {folder / 'report.html'}")
         except Exception:
-            print(f"\n  [ошибка построения отчёта для {ds.path.name}]")
+            print(f"\n  [ошибка построения отчёта для {ds.title}]")
             traceback.print_exc()
 
     if results:
@@ -176,9 +212,7 @@ def main() -> int:
             print("\n[ошибка построения сводного xlsx]")
             traceback.print_exc()
 
-    if not loaded:
-        return 1
-    print(f"\nГотово: прочитано {len(loaded)} из {len(files)} файлов.")
+    print(f"\nГотово: обработано наборов данных: {len(loaded)}.")
     return 0
 
 def _pct(x) -> str:
