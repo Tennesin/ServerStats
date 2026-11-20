@@ -1,11 +1,10 @@
 """Этап 3: СЗП (степень значимости пользователя для сервера) и справочная шкала «риск потери»."""
-
 import numpy as np
 import pandas as pd
 
 import settings as S
 from loader import Dataset
-from metrics import calendar_days
+from metrics import calendar_days, grouped_channels
 
 def _label(value: float, levels) -> str:
     for threshold, name in levels:
@@ -19,14 +18,12 @@ def audit_weight(action: str) -> float:
         return 0.0
     return float(S.SZP_AUDIT_WEIGHTS.get(action, S.SZP_AUDIT_DEFAULT))
 
-
 def _sqrt_norm(s: pd.Series) -> pd.Series:
     """√(значение / максимум). Лидер получает 1; если максимум 0 — всем 0."""
     mx = float(s.max()) if len(s) else 0.0
     if mx <= 0:
         return pd.Series(0.0, index=s.index)
     return np.sqrt(s / mx)
-
 
 def role_values(ds: Dataset, idx) -> pd.Series:
     """Роль 0..1: формальная (основатель/админ) или неформальная из настроек — что выше.
@@ -118,13 +115,16 @@ def compute_szp(ds: Dataset, um: pd.DataFrame,
     # B — охват: доля значимых каналов, где человек пишет
     B = nan.copy()
     present, n_sig = zero.copy(), 0
-    ch = ds.channels[ds.channels["n"] > 0] if len(ds.channels) else ds.channels
-    if len(ch):
-        chan_tot = ch.groupby("channel_id")["n"].sum()
+    ch = grouped_channels(ds)
+    if ch is not None and len(ch):
+        ch = ch[ch["n"] > 0]
+    if ch is not None and len(ch):
+        ch = ch.groupby(["uid", "group_id"], as_index=False)["n"].sum()
+        chan_tot = ch.groupby("group_id")["n"].sum()
         sig = chan_tot[chan_tot / chan_tot.sum() >= S.SZP_SIG_CHANNEL].index
         n_sig = len(sig)
         if n_sig:
-            cnt = ch[ch["channel_id"].isin(sig) & (ch["n"] >= S.SZP_B_MIN_MSGS)].groupby("uid").size()
+            cnt = ch[ch["group_id"].isin(sig) & (ch["n"] >= S.SZP_B_MIN_MSGS)].groupby("uid").size()
             present = cnt.reindex(idx).fillna(0.0)
             B = present / n_sig
 

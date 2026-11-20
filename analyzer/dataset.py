@@ -1,5 +1,4 @@
-"""Контракт между источниками данных (xlsx, БД) и остальным анализатором: класс Dataset.
-Источники заполняют Dataset, metrics / scoring / charts / report_* читают только его."""
+"""Контракт между источником данных и остальным анализатором."""
 
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -104,8 +103,7 @@ class Dataset:
     server_start: Optional[date] = None
     admin_events: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=ADMIN_EVENT_COLS))
 
-    # ---- Новое (заполняет источник «БД»; у xlsx остаются значения по умолчанию) ----
-    source: str = "xlsx"             # "xlsx" / "db"
+    source: str = "db"               # источник данных
     guild_ids: list = field(default_factory=list)       # серверы, вошедшие в набор (в суммарном — несколько)
     audit_actions: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=AUDIT_ACTION_COLS))
     audit_days: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=AUDIT_DAY_COLS))

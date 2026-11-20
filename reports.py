@@ -32,7 +32,6 @@ AUDIT_STATUS = {
     "failed": "сбор прервался ошибкой, данные неполные",
     "partial": "собран не по всем серверам (подробности на листе «Служебное»)",
 }
-AUDIT_MODE_CODE = {"off": 0, "ok": 1, "denied": 2, "failed": 3, "partial": 4}
 AUDIT_UNKNOWN_ACTOR = "(автор не определён)"
 MODE_TITLES = {
     "days": "по дням",
@@ -744,170 +743,6 @@ def sheet_role_perms(wb, F, result: ScanResult, guild_name: str):
                         F["note"])
         row += 3
 
-def sheet_data(wb, agg: Agg, result: ScanResult):
-    """Скрытые машиночитаемые листы для автономного анализатора: полные данные без обрезаний.
-    ID пишутся строкой: числа в Excel теряют точность после 15 цифр."""
-
-    def table(name, headers, rows):
-        ws = wb.add_worksheet(name)
-        ws.write_row(0, 0, headers)
-        r = 0
-        for row in rows:
-            if r >= MAX_LIST_ROWS:
-                break
-            r += 1
-            for c, v in enumerate(row):
-                if isinstance(v, str):
-                    ws.write_string(r, c, clean(v))
-                else:
-                    ws.write_number(r, c, v)
-        ws.hide()
-
-    prev_users = set()
-    if result.prev is not None:
-        prev_users = {u for (u, _d) in result.prev.user_day}
-    extra = sorted(prev_users - set(agg.order))     # писали только в прошлом периоде
-
-    table(
-        "data_users",
-        ["uid", "name", "username", "messages", "replies", "role", "avatar"],
-        ((str(u), agg.names.get(u, str(u)), agg.usernames.get(u, ""),
-          agg.totals.get(u, 0), result.replies.get(u, 0), agg.role_of(u),
-          result.avatars.get(u, ""))
-         for u in [*agg.order, *extra]),
-    )
-    table(
-        "data_channels",
-        ["uid", "channel_id", "channel", "messages"],
-        ((str(u), str(cid), result.channel_names.get(cid, ""), n)
-         for (u, cid), n in result.user_channel.items()),
-    )
-    table(
-        "data_heat",
-        ["uid", "weekday", "hour", "messages"],
-        ((str(u), wd, hr, n) for (u, wd, hr), n in result.user_heat.items()),
-    )
-    table(
-        "data_replies",
-        ["src", "dst", "messages"],
-        ((str(a), str(b), n) for (a, b), n in result.reply_pairs.items()),
-    )
-    table(
-        "data_mentions",
-        ["src", "dst", "messages"],
-        ((str(a), str(b), n) for (a, b), n in result.mention_pairs.items()),
-    )
-    table(
-        "data_reply_meta",
-        ["key", "value"],
-        [("unresolved", result.reply_unresolved),
-         ("self_or_bot", result.reply_self_or_bot)],
-    )
-    table(
-        "data_emoji",
-        ["uid", "emoji", "only", "uses"],
-        ((str(u), key, flag, n) for (u, key, flag), n in result.emoji_user.items()),
-    )
-    table(
-        "data_emoji_info",
-        ["emoji", "name", "animated", "external"],
-        ((key, name, anim, ext) for key, (name, anim, ext) in result.emoji_info.items()),
-    )
-    table(
-        "data_emoji_days",
-        ["uid", "date", "messages"],
-        ((str(u), d.isoformat(), n) for (u, d), n in result.emoji_only_day.items()),
-    )
-
-    # Реакции (схема 4). Нет листа data_reaction_meta — реакции не собирались.
-    if result.reaction_mode != "off":
-        def reaction_rows():
-            for (u, key), n in result.reaction_recv.items():
-                yield (str(u), key, "recv", n)
-            for (u, key), n in result.reaction_given.items():
-                yield (str(u), key, "given", n)
-
-        table(
-            "data_reaction_meta",
-            ["key", "value"],
-            [("mode", 2 if result.reaction_mode == "full" else 1),
-             ("self_or_bot", result.reaction_self_or_bot),
-             ("unattributed", result.reaction_unattributed),
-             ("capped", result.reaction_capped),
-             ("errors", result.reaction_errors)],
-        )
-        table(
-            "data_reactions",
-            ["uid", "emoji", "direction", "uses"],
-            reaction_rows(),
-        )
-        table(
-            "data_reaction_msgs",
-            ["uid", "messages"],
-            ((str(u), n) for u, n in result.reaction_msgs.items()),
-        )
-        table(
-            "data_reaction_pairs",
-            ["src", "dst", "messages"],      # «messages» = число реакций; имя колонки общее с data_replies
-            ((str(a), str(b), n) for (a, b), n in result.reaction_pairs.items()),
-        )
-        rx_users = ({u for (u, _k) in result.reaction_given}
-                    | {u for pair in result.reaction_pairs for u in pair})
-        table(
-            "data_reaction_users",
-            ["uid", "name", "username"],
-            ((str(u), agg.names.get(u, str(u)), agg.usernames.get(u, "")) for u in sorted(rx_users)),
-        )
-
-    # Журнал аудита. Нет листа data_audit_meta — аудит не собирался.
-    # mode: 1 — собран, 2 — нет доступа, 3 — ошибка (данные неполные), 4 — собран не по всем серверам.
-    if result.audit_mode != "off":
-        table(
-            "data_audit_meta",
-            ["key", "value"],
-            [("mode", AUDIT_MODE_CODE.get(result.audit_mode, 0)),
-             ("total", result.audit_total),
-             ("skipped", result.audit_skipped),
-             ("unknown_actor", result.audit_unknown_actor),
-             ("truncated", result.audit_truncated)],
-        )
-        table(
-            "data_audit_actions",
-            ["action", "count", "units"],
-            ((code, n, result.audit_units.get(code, n)) for code, n in result.audit_actions.items()),
-        )
-        table(
-            "data_audit_users",
-            ["uid", "name", "action", "count", "units"],
-            ((str(u), result.audit_names.get(u) or agg.names.get(u, str(u)), code, n,
-              result.audit_user_units.get((u, code), n))
-             for (u, code), n in result.audit_user_action.items()),
-        )
-        table(
-            "data_audit_days",
-            ["date", "count"],
-            ((d.isoformat(), n) for d, n in sorted(result.audit_day.items())),
-        )
-        table(
-            "data_admin_events",
-            ["date", "kind", "role", "who", "who2", "server"],
-            ((e.day.isoformat(), e.kind, e.role, event_person(agg, result, e.uid),
-              event_person(agg, result, e.uid2), e.server) for e in result.admin_events),
-        )
-
-    if result.user_server:
-        table(
-            "data_servers",
-            ["uid", "server", "messages"],
-            ((str(u), srv, n) for (u, srv), n in result.user_server.items()),
-        )
-    if result.prev is not None:
-        table(
-            "data_prev",
-            ["uid", "date", "messages"],
-            ((str(u), d.isoformat(), n) for (u, d), n in result.prev.user_day.items()),
-        )
-
 def sheet_audit(wb, F, agg: Agg, result: ScanResult, params: ScanParams, name_w):
     """Лист «Аудит»: сводка по журналу аудита (действия администрации)."""
     ws = wb.add_worksheet("Аудит")
@@ -1040,9 +875,6 @@ def sheet_info(wb, F, guild_name, params, state, matrix_note, truncated, merged=
     info = [
         ("Сервер", guild_name),
         ("Период", period_text(params)),
-        ("Схема данных", "4"),
-        ("Период: начало (ISO)", params.start_date.isoformat() if params.start_date else "нет"),
-        ("Период: конец (ISO)", params.end_date.isoformat() if params.end_date else "нет"),
         ("Суммарный файл", "да" if merged else "нет"),
     ]
     if params.compare:
@@ -1118,7 +950,6 @@ def build_xlsx(guild_name: str, params: ScanParams, state: ScanState, result: Sc
     if result.audit_mode != "off":
         sheet_audit(wb, F, agg, result, params, name_w)
     sheet_info(wb, F, guild_name, params, state, matrix_note, truncated, agg.merged)
-    sheet_data(wb, agg, result)
 
     wb.close()
     return buf.getvalue()

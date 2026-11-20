@@ -1,7 +1,11 @@
-"""Автономный анализатор отчётов бота.
+"""Автономный анализатор данных бота статистики.
 
-Запуск:  python analyze.py "путь_к_папке_с_xlsx"
-(этап 1: чтение, проверка и сводка; отчёты появятся на следующих этапах)
+Читает базу бота (stats.db) напрямую; период и серверы выбираются здесь, бота запускать не нужно.
+Запуск из папки analyzer:
+  python analyze.py                                  вся история, все серверы
+  python analyze.py --last 30d                       последние 30 дней
+  python analyze.py --servers 111,222 --period prev-month --compare
+Все параметры: python analyze.py --help
 """
 import argparse
 import sys
@@ -11,7 +15,7 @@ import pandas as pd
 from pathlib import Path
 
 import settings as S
-from loader import Dataset, LoaderError, discover, load_dataset, load_db
+from loader import Dataset, LoaderError, load_db
 from metrics import (
     TREND_WINDOW, calendar_days, emoji_server_metrics, emoji_user_metrics,
     presence_user_metrics, reaction_server_metrics, reaction_user_metrics, server_metrics, user_metrics
@@ -27,10 +31,8 @@ from settings import WEEKDAYS
 from avatars import fetch_avatar
 
 def describe(ds: Dataset):
-    kind = "СУММАРНЫЙ ФАЙЛ" if ds.is_merged else "Сервер"
+    kind = "СУММАРНЫЙ НАБОР" if ds.is_merged else "Сервер"
     print(f"\n=== {kind}: {ds.title} ===")
-    print(f"  Файл:            {ds.path.name}")
-    print(f"  Схема данных:    {ds.schema} ({'полная' if ds.full_data else 'урезанная, старый формат'})")
     print(f"  Период:          {ds.period_text or '—'}")
     print(f"  Окно анализа:    {ds.window[0]} — {ds.window[1]} ({ds.window_days} дн.)")
     print(f"  Дни с данными:   {ds.data_start} — {ds.data_end}  |  часовой пояс: {ds.tz or '—'}")
@@ -42,6 +44,11 @@ def describe(ds: Dataset):
         print(f"  Есть предыдущий период: строк {len(ds.prev_daily)}")
     if len(ds.staff):
         print(f"  Администрация:   {len(ds.staff)} чел.")
+    print(f"  Присутствие:     {'снимок есть' if ds.has_presence else 'снимка нет (выполните -sync)'}"
+          f"  |  роли: {'есть' if ds.has_roles else 'нет'}"
+          f"  |  журнал аудита: {ds.audit_total} зап." if ds.has_audit
+          else f"  Присутствие:     {'снимок есть' if ds.has_presence else 'снимка нет (выполните -sync)'}"
+               f"  |  роли: {'есть' if ds.has_roles else 'нет'}  |  журнал аудита: нет")
     if ds.warnings:
         print("  Предупреждения:")
         for w in ds.warnings:
@@ -120,25 +127,6 @@ def make_reports(ds: Dataset, out_dir: Path, args):
         build_server_html(ds, sm, um, sk, linked, server_emoji, server_admin), encoding="utf-8")
     return folder, {"ds": ds, "sm": sm, "um": um, "sk": sk, "em": em, "rx": rx}
 
-def _from_xlsx(path_text: str):
-    """Устаревший режим: возвращает (список Dataset, папка вывода по умолчанию)."""
-    root = Path(path_text).expanduser()
-    if not root.exists():
-        raise LoaderError(f"Путь не найден: {root}")
-    files, chosen = discover(root)
-    if chosen:
-        print(f"В указанной папке нет xlsx; взята самая свежая вложенная: {chosen}")
-    if not files:
-        raise LoaderError("xlsx-файлы не найдены.")
-    print(f"Найдено файлов: {len(files)}")
-    loaded = []
-    for p in files:
-        try:
-            loaded.append(load_dataset(p))
-        except LoaderError as e:
-            print(f"\n[пропущен] {p.name}: {e}")
-    return loaded, files[0].parent / "analysis"
-
 def _from_db(args):
     """Основной режим: чтение из stats.db. Возвращает (список Dataset, папка вывода по умолчанию)."""
     period = args.period
@@ -156,70 +144,6 @@ def _from_db(args):
         raise LoaderError("--servers: ID серверов через запятую или all.")
     loaded, folder = load_db(args.db, ids, period, args.start, args.end, args.compare, args.reactions)
     return loaded, Path(__file__).resolve().parent / "analysis" / folder
-
-def main() -> int:
-    if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-
-    ap = argparse.ArgumentParser(description="Автономный анализатор данных бота статистики")
-    ap.add_argument("path", nargs="?",
-                    help="(устаревший режим) папка с xlsx-файлами или один файл; без него данные читаются из БД")
-    ap.add_argument("--db", help="путь к stats.db (по умолчанию — база рядом с ботом)")
-    ap.add_argument("--servers", default="all", help="ID серверов через запятую или all (по умолчанию all)")
-    ap.add_argument("--period", help="пресет периода бота: prev-week, prev-month, last30d и т. д.")
-    ap.add_argument("--last", help="сокращение: 45d = last45d (d, w, m, y)")
-    ap.add_argument("--start", help="дата начала дд.мм.гггг")
-    ap.add_argument("--end", help="дата конца дд.мм.гггг (по умолчанию вчера)")
-    ap.add_argument("--compare", action="store_true", help="сравнить с предыдущим периодом такой же длины")
-    ap.add_argument("--reactions", choices=["auto", "counts", "full"], default="auto",
-                    help="режим реакций: auto — как собрано в базе")
-    ap.add_argument("--top", type=int, default=10, help="сколько пользователей показать в топе (0 — не показывать)")
-    ap.add_argument("--out", help="куда сохранять отчёты (по умолчанию — analysis/<период> рядом со скриптом)")
-    ap.add_argument("--no-reports", action="store_true", help="только сводка в терминале, без HTML и xlsx")
-    ap.add_argument("--no-avatars", action="store_true",
-                    help="не скачивать аватарки (отчёты строятся без интернета)")
-    ap.add_argument("--top-n", type=int, default=S.SELECT_TOP_N,
-                    help="сколько лучших по СЗП получают индивидуальный отчёт")
-    ap.add_argument("--min-szp", type=float, default=S.SELECT_MIN_SZP,
-                    help="и все, у кого СЗП не ниже этого значения")
-    ap.add_argument("--max-individual", type=int, default=S.MAX_INDIVIDUAL,
-                    help="предел числа индивидуальных отчётов на файл")
-    args = ap.parse_args()
-
-    try:
-        loaded, default_out = _from_xlsx(args.path) if args.path else _from_db(args)
-    except LoaderError as e:
-        print(f"Ошибка: {e}")
-        return 1
-    if not loaded:
-        return 1
-
-    out_dir = Path(args.out).expanduser() if args.out else default_out
-    results = []
-    for ds in loaded:
-        describe(ds)
-        show_metrics(ds, args.top)
-        if args.no_reports:
-            continue
-        try:
-            folder, item = make_reports(ds, out_dir, args)
-            results.append(item)
-            print(f"\n  HTML-отчёт: {folder / 'report.html'}")
-        except Exception:
-            print(f"\n  [ошибка построения отчёта для {ds.title}]")
-            traceback.print_exc()
-
-    if results:
-        xlsx_path = out_dir / "analysis_summary.xlsx"
-        try:
-            build_summary_xlsx(results, xlsx_path)
-            print(f"\nСводный xlsx: {xlsx_path}")
-        except Exception:
-            print("\n[ошибка построения сводного xlsx]")
-            traceback.print_exc()
-
-    print(f"\nГотово: обработано наборов данных: {len(loaded)}.")
-    return 0
 
 def _pct(x) -> str:
     return "—" if x is None or x != x else f"{x * 100:.1f}%"
@@ -296,6 +220,69 @@ def show_metrics(ds: Dataset, top: int):
             print(f"    {int(r['rank']):>3}. {str(r['name'])[:24]:<24} {int(r['messages']):>6} сообщ., "
                   f"дней {int(r['active_days']):>3}, серия {int(r['longest_streak'])}, "
                   f"тренд: {r['trend']}, достоверность: {r['reliability']}")
+
+def main() -> int:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
+    ap = argparse.ArgumentParser(
+        description="Анализатор данных бота статистики: читает stats.db, строит HTML-отчёты и сводный xlsx.")
+    ap.add_argument("--db", help="путь к stats.db (по умолчанию — база рядом с ботом)")
+    ap.add_argument("--servers", default="all", help="ID серверов через запятую или all (по умолчанию all)")
+    ap.add_argument("--period", help="пресет периода бота: prev-week, prev-month, last30d и т. д.")
+    ap.add_argument("--last", help="сокращение: 45d = last45d (d, w, m, y)")
+    ap.add_argument("--start", help="дата начала дд.мм.гггг")
+    ap.add_argument("--end", help="дата конца дд.мм.гггг (по умолчанию вчера)")
+    ap.add_argument("--compare", action="store_true", help="сравнить с предыдущим периодом такой же длины")
+    ap.add_argument("--reactions", choices=["auto", "counts", "full"], default="auto",
+                    help="режим реакций: auto — как собрано в базе")
+    ap.add_argument("--top", type=int, default=10, help="сколько пользователей показать в топе (0 — не показывать)")
+    ap.add_argument("--out", help="куда сохранять отчёты (по умолчанию — analysis/<период> рядом со скриптом)")
+    ap.add_argument("--no-reports", action="store_true", help="только сводка в терминале, без HTML и xlsx")
+    ap.add_argument("--no-avatars", action="store_true",
+                    help="не скачивать аватарки и картинки эмодзи (работа без интернета)")
+    ap.add_argument("--top-n", type=int, default=S.SELECT_TOP_N,
+                    help="сколько лучших по СЗП получают индивидуальный отчёт")
+    ap.add_argument("--min-szp", type=float, default=S.SELECT_MIN_SZP,
+                    help="и все, у кого СЗП не ниже этого значения")
+    ap.add_argument("--max-individual", type=int, default=S.MAX_INDIVIDUAL,
+                    help="предел числа индивидуальных отчётов на сервер")
+    args = ap.parse_args()
+
+    try:
+        loaded, default_out = _from_db(args)
+    except LoaderError as e:
+        print(f"Ошибка: {e}")
+        return 1
+    if not loaded:
+        return 1
+
+    out_dir = Path(args.out).expanduser() if args.out else default_out
+    results = []
+    for ds in loaded:
+        describe(ds)
+        show_metrics(ds, args.top)
+        if args.no_reports:
+            continue
+        try:
+            folder, item = make_reports(ds, out_dir, args)
+            results.append(item)
+            print(f"\n  HTML-отчёт: {folder / 'report.html'}")
+        except Exception:
+            print(f"\n  [ошибка построения отчёта для {ds.title}]")
+            traceback.print_exc()
+
+    if results:
+        xlsx_path = out_dir / "analysis_summary.xlsx"
+        try:
+            build_summary_xlsx(results, xlsx_path)
+            print(f"\nСводный xlsx: {xlsx_path}")
+        except Exception:
+            print("\n[ошибка построения сводного xlsx]")
+            traceback.print_exc()
+
+    print(f"\nГотово: обработано наборов данных: {len(loaded)}.")
+    return 0
 
 if __name__ == "__main__":
     sys.exit(main())

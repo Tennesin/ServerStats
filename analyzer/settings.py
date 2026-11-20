@@ -1,54 +1,11 @@
-"""Настройки автономного анализатора. Имена листов и ключей должны совпадать с reports.py бота."""
+"""Настройки автономного анализатора: подписи, СЗП, отбор для индивидуальных отчётов."""
 
-from datetime import date
-
-# Видимые листы отчёта бота
-SHEET_SUMMARY = "Сводка"
-SHEET_DAILY = "По дням (список)"
-SHEET_ANALYTICS = "Аналитика"
-SHEET_STAFF = "Администрация"
-SHEET_INFO = "Служебное"
-
-# Скрытые служебные листы (схема данных 2)
-SHEET_DATA_USERS = "data_users"
-SHEET_DATA_CHANNELS = "data_channels"
-SHEET_DATA_HEAT = "data_heat"
-SHEET_DATA_SERVERS = "data_servers"
-SHEET_DATA_PREV = "data_prev"
-SHEET_DATA_REPLIES = "data_replies"
-SHEET_DATA_MENTIONS = "data_mentions"
-SHEET_DATA_REPLY_META = "data_reply_meta"
-SHEET_DATA_EMOJI = "data_emoji"
-SHEET_DATA_EMOJI_INFO = "data_emoji_info"
-SHEET_DATA_EMOJI_DAYS = "data_emoji_days"
-SHEET_DATA_REACTION_META = "data_reaction_meta"
-SHEET_DATA_REACTIONS = "data_reactions"
-SHEET_DATA_REACTION_MSGS = "data_reaction_msgs"
-SHEET_DATA_REACTION_PAIRS = "data_reaction_pairs"
-SHEET_DATA_REACTION_USERS = "data_reaction_users"
-SHEET_DATA_AUDIT_META = "data_audit_meta"
-SHEET_DATA_AUDIT_USERS = "data_audit_users"
-SHEET_DATA_ADMIN_EVENTS = "data_admin_events"
-
-REQUIRED_SHEETS = [SHEET_SUMMARY, SHEET_DAILY, SHEET_INFO]
-
-# Ключи листа «Служебное», которые могут повторяться
-MULTI_KEYS = {"Примечание", "⚠ Внимание"}
-KIND_BACK = {"Основатель": "owner", "Админ": "admin"}
-MERGED_FILE_PREFIX = "Суммарная"
-MERGED_TITLE_PREFIX = "Суммарно по серверам"
 WEEKDAYS = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
-KIND_RU = {v: k for k, v in KIND_BACK.items()}
+KIND_RU = {"owner": "Основатель", "admin": "Админ"}
 ADMIN_EVENT_LABELS = {
     "admin_grant": "Выдана админская роль",
     "admin_revoke": "Снята админская роль",
     "owner_transfer": "Передача прав Основателя",
-}
-
-# ---------- Начало истории серверов ----------
-GUILD_START_DATES = {
-    1548361478103638068: date(2026, 9, 27),   # Суетологи
-    1561089081264316570: date(2026, 10, 18),  # Комитет
 }
 
 # ---------- СЗП: степень значимости пользователя (этап 3) ----------
