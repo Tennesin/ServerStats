@@ -142,7 +142,8 @@ def _from_db(args):
             raise LoaderError("Укажите либо --period, либо --last.")
         last = args.last.strip().lower()
         period = last if last.startswith("last") else "last" + last
-    tokens = [t for part in args.servers for t in part.replace(",", " ").split() if t]
+    raw = [args.servers] if isinstance(args.servers, str) else args.servers
+    tokens = [t for part in raw for t in part.replace(",", " ").split() if t]
     if not tokens or any(t.lower() == "all" for t in tokens):
         ids = None
     elif all(t.isdigit() for t in tokens):
@@ -239,7 +240,8 @@ def main() -> int:
     ap = argparse.ArgumentParser(
         description="Анализатор данных бота статистики: читает stats.db, строит HTML-отчёты и сводный xlsx.")
     ap.add_argument("--db", help="путь к stats.db (по умолчанию — база рядом с ботом)")
-    ap.add_argument("--servers", default="all", help="ID серверов через запятую или all (по умолчанию all)")
+    ap.add_argument("--servers", nargs="+", default=["all"],
+                    help="ID серверов через пробел или запятую, либо all (по умолчанию all)")
     ap.add_argument("--period", help="пресет периода бота: prev-week, prev-month, last30d и т. д.")
     ap.add_argument("--last", help="сокращение: 45d = last45d (d, w, m, y)")
     ap.add_argument("--start", help="дата начала дд.мм.гггг")
