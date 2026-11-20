@@ -1,5 +1,5 @@
 """Этап 5: HTML-отчёты (один файл, картинки вшиты в base64)."""
-
+import pandas as pd
 import html
 import json
 from datetime import datetime, timedelta
@@ -181,6 +181,12 @@ def _trend_hint(r) -> str:
         return f"нет сообщений {int(r['days_since_last'])} дн."
     return ""
 
+def _present_map(ds):
+    """(сервер, uid) -> 1/0 по снимку присутствия. None — снимка нет."""
+    if not getattr(ds, "has_presence", False):
+        return None
+    return {(r.server, r.uid): int(r.present) for r in ds.presence.itertuples(index=False)}
+
 def method_html() -> str:
     W = S.SZP_WEIGHTS
 
@@ -242,10 +248,12 @@ def _szp_data(sk, um, linked) -> list:
         if not (sel or uid in top_on or uid in top_off):
             continue
         r = um.loc[uid]
+        here = r["in_server"] if "in_server" in um.columns else None
+        gone = (here is False) or (isinstance(here, np.bool_) and not here)
         out.append({
             "id": str(uid), "name": str(r["name"]),
             "href": ("users/" + quote(linked[uid])) if uid in linked else "",
-            "sel": sel,
+            "sel": sel, "gone": bool(gone),
             "szp": round(float(szp_on[uid]), 2), "off": round(float(szp_off[uid]), 2),
             "pts": [round(float(x), 3) for x in pts[pos]],
             "rk": [int(s["szp_rank"]), int(rank_off[uid])],
@@ -292,7 +300,7 @@ function render(){
   bars.textContent='';
   top.forEach(function(x){
     var row=el('div','szp-row');
-    var nm=el('div','szp-name',x.d.name);nm.title=x.d.name;
+    var nm=el('div','szp-name',x.d.name+(x.d.gone?' ✕':''));nm.title=x.d.name+(x.d.gone?' (нет на сервере)':'');
     var track=el('div','szp-track');
     x.d.pts.forEach(function(p,i){
       if(!on&&i===CFG.gi)return;
@@ -314,6 +322,7 @@ function render(){
     td(String(x.rk),true);
     var c=el('td');
     if(x.d.href){var a=el('a','',x.d.name);a.href=x.d.href;c.appendChild(a);}else{c.textContent=x.d.name;}
+    if(x.d.gone){c.appendChild(el('span','muted',' · нет на сервере'));}
     tr.appendChild(c);
     td(x.v.toFixed(1)+(x.d.low?' ≈':''),true);
     td(lvl(x.v));
@@ -361,7 +370,7 @@ def szp_widget_html(sk, um, linked) -> str:
 
 # ---------- Отчёт по серверу ----------
 
-def build_server_html(ds, sm, um, sk, linked, emoji_html: str = "") -> str:
+def build_server_html(ds, sm, um, sk, linked, emoji_html: str = "", admin_html: str = "") -> str:
     rel = sm["reliability"]
     kind = "Суммарный отчёт" if ds.is_merged else "Отчёт по серверу"
     b = [
@@ -448,19 +457,24 @@ def build_server_html(ds, sm, um, sk, linked, emoji_html: str = "") -> str:
         ]))
         b.append(img(C.chart_heatmap(t["matrix"], ds.tz), "Тепловая карта"))
 
-    # Каналы
+    # Каналы (ветки свёрнуты в родительский канал)
     chn = sm["channels"]
     if chn:
         b.append(h2("Каналы", chn["rel"]))
-        b.append(ul([
+        lines = [
             f"Топ-3 канала дают {pct(chn['top3_share'])} сообщений.",
             f"Пишут только в одном канале: {pct(chn['single_channel_share'])} пользователей; "
             f"в среднем каналов на человека: {chn['mean_channels']:.1f}.",
-        ]))
+        ]
+        if chn["thread_count"]:
+            lines.append(f"Веток: {chn['thread_count']}; они свёрнуты в родительские каналы, "
+                         f"в них {pct(chn['thread_share'])} сообщений.")
+        b.append(ul(lines))
         b.append(img(C.chart_channels(chn["table"]), "Топ каналов"))
-        b.append(table(["Канал", "Сообщений", "Доля", "Авторов"],
-                       [[r["channel"], int(r["messages"]), pct(r["share"]), int(r["authors"])]
-                        for _cid, r in chn["table"].head(15).iterrows()], num_cols=(1, 2, 3)))
+        b.append(table(["Канал", "Сообщений", "Доля", "Авторов", "В т.ч. в ветках"],
+                       [[r["channel"], int(r["messages"]), pct(r["share"]), int(r["authors"]),
+                         int(r["thread_messages"]) or "—"]
+                        for _cid, r in chn["table"].head(15).iterrows()], num_cols=(1, 2, 3, 4)))
 
     if emoji_html:
         b.append(emoji_html)
@@ -469,6 +483,14 @@ def build_server_html(ds, sm, um, sk, linked, emoji_html: str = "") -> str:
     lc = sm["lifecycle"]
     b.append(h2("Жизненный цикл", lc["rel"]))
     items = [f"Притихли (нет сообщений последние {M.DORMANT_DAYS} дн. окна): {lc['dormant']} чел. ({pct(lc['dormant_share'])})."]
+    pr = lc.get("presence")
+    if pr:
+        items.append(f"Из писавших в окне на сервере остаются {pr['writers'] - pr['gone']} из {pr['writers']}; "
+                     f"нет на сервере: {pr['gone']} чел. ({pct(pr['gone_share'])}), на них пришлось "
+                     f"{pct(pr['gone_msg_share'])} сообщений окна.")
+        items.append(f"Из притихших ещё на сервере: {pr['dormant_present']}, уже ушли: {pr['dormant_gone']}.")
+        items.append(f"Вступили в период окна: {pr['joined']} чел., из них написали хотя бы раз: "
+                     f"{pr['joined_wrote']}. Ушли (по данным бота): {pr['left']}.")
     items.append(f"Писали уже в первый день окна ({ds.window[0]}): {lc['from_start']} чел. "
                  "Это стартовая аудитория, а не приток новых.")
     if "retained" in lc:
@@ -510,12 +532,19 @@ def build_server_html(ds, sm, um, sk, linked, emoji_html: str = "") -> str:
         if st:
             b.append(f"<p>{st['people']} чел. написали {num(st['messages'])} сообщений — "
                      f"{pct(st['share'])} от всех.</p>")
+        pmap = _present_map(ds)
         s2 = ds.staff.copy()
         s2["k"] = s2["kind"].map({"owner": 0, "admin": 1})
         s2 = s2.sort_values(["server", "k", "n"], ascending=[True, True, False])
-        b.append(table(["Сервер", "Пользователь", "Должность", "Роли", "Сообщений"],
-                       [[r.server, r.name, S.KIND_RU.get(r.kind, r.kind), r.roles or "—", int(r.n)]
-                        for r in s2.itertuples()], num_cols=(4,)))
+
+        def here(r):
+            v = pmap.get((r.server, r.uid)) if pmap is not None else None
+            return "—" if v is None else ("да" if v == 1 else "нет")
+
+        head = ["Сервер", "Пользователь", "Должность", "Роли", "Сообщений"] + (["На сервере"] if pmap is not None else [])
+        rows = [[r.server, r.name, S.KIND_RU.get(r.kind, r.kind), r.roles or "—", int(r.n)]
+                + ([here(r)] if pmap is not None else []) for r in s2.itertuples()]
+        b.append(table(head, rows, num_cols=(4,)))
 
     if len(ds.admin_events):
         if not len(ds.staff):
@@ -533,6 +562,8 @@ def build_server_html(ds, sm, um, sk, linked, emoji_html: str = "") -> str:
             rows.append(row)
         b.append(table(head, rows))
 
+    if admin_html:                       # журнал аудита, роли и боты
+        b.append(admin_html)
     # СЗП
     if len(sk):
         b.append(h2("СЗП: значимость пользователей", rel))
@@ -648,7 +679,7 @@ def _reply_section(ds, uid, r) -> str:
     parts.append(f'<p class="muted">{note}</p>')
     return "".join(parts)
 
-def build_user_html(ds, uid, um, sk, days, avatar=None, emoji_html: str = "") -> str:
+def build_user_html(ds, uid, um, sk, days, avatar=None, emoji_html: str = "", status_html: str = "") -> str:
     r, s = um.loc[uid], sk.loc[uid]
     D = len(days)
     W = S.SZP_WEIGHTS
@@ -663,6 +694,8 @@ def build_user_html(ds, uid, um, sk, days, avatar=None, emoji_html: str = "") ->
         av = f'<div class="avatar ph">{esc(letter)}</div>'
     b.append(f'<div class="head"><div><h1>{esc(r["name"])}</h1>'
              f'<p class="muted">{esc(" · ".join(sub))}</p></div>{av}</div>')
+    if status_html:                      # присутствие и роли
+        b.append(status_html)
 
     # Особая информация (заполняется вручную в settings.SPEC_INFO)
     spec = S.SPEC_INFO_BY_ID.get(str(uid))
@@ -724,18 +757,23 @@ def build_user_html(ds, uid, um, sk, days, avatar=None, emoji_html: str = "") ->
                  f"ночью — {pct(r['night_share'])}, в выходные — {pct(r['weekend_share'])} "
                  f"(часовой пояс {esc(ds.tz or '—')}).</p>")
 
-    # Каналы
-    chn = ds.channels
-    if len(chn):
-        mine_ch = chn[chn["uid"] == uid].sort_values("n", ascending=False)
-        total = mine_ch["n"].sum()
+    # Каналы (ветки свёрнуты в родительский канал)
+    chn = M.grouped_channels(ds)
+    if chn is not None and len(chn):
+        mine_ch = chn[chn["uid"] == uid]
+        total = mine_ch["n"].sum() if len(mine_ch) else 0
         if total:
+            by = mine_ch.groupby("group_label")["n"].sum()
+            th = (mine_ch[mine_ch["is_thread"]].groupby("group_label")["n"].sum()
+                  .reindex(by.index).fillna(0))
+            g = pd.DataFrame({"n": by, "th": th}).sort_values("n", ascending=False, kind="stable")
             b.append(h2("Где пишет"))
-            b.append(table(["Канал", "Сообщений", "Доля"],
-                           [[x.channel, int(x.n), pct(x.n / total)] for x in mine_ch.head(8).itertuples()],
-                           num_cols=(1, 2)))
-            if len(mine_ch) > 8:
-                b.append(f'<p class="muted">Показаны 8 из {len(mine_ch)} каналов.</p>')
+            b.append(table(["Канал", "Сообщений", "Доля", "В т.ч. в ветках"],
+                           [[name, int(x.n), pct(x.n / total), int(x.th) or "—"]
+                            for name, x in g.head(8).iterrows()],
+                           num_cols=(1, 2, 3)))
+            if len(g) > 8:
+                b.append(f'<p class="muted">Показаны 8 из {len(g)} каналов; ветки учтены вместе с родительским каналом.</p>')
 
     b.append(_reply_section(ds, uid, r))
     if emoji_html:

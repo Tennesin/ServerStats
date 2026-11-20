@@ -100,9 +100,10 @@ def _load_guild(db, path: Path, gid: int, title: str, s: date, e: date, compare:
     excluded = [r.label for r in ch.itertuples() if int(r.channel_id) in excl]
     labels = {int(r.channel_id): r.label for r in ch.itertuples()}
     channel_parent = {str(int(r.channel_id)): int(r.parent_id) for r in ch.itertuples() if pd.notna(r.parent_id)}
-    unused = rules.unused()
-    if unused:
-        notes.append("Правила исключения чатов, которые ни с чем не совпали: " + ", ".join(unused))
+    n_rules = len(rules.names) + len(rules.ids)
+    if n_rules and not excluded:
+        notes.append(f"Заданы правила исключения чатов ({n_rules}): такие каналы бот не читает вообще, "
+                     "поэтому в базе их нет и в отчёте они не перечислены.")
 
     # ---- люди ----
     ur = _q(db, "SELECT uid, display_name, username, avatar_url, is_bot, last_seen_ts FROM users WHERE guild_id=?", (gid,))
@@ -383,8 +384,8 @@ def _load_guild(db, path: Path, gid: int, title: str, s: date, e: date, compare:
         warnings.append("В базе нет завершённой синхронизации для этого сервера: данные могут быть пустыми или неполными.")
     g_start = guild_start_date_by_id(gid)
     if s > g_start:
-        warnings.append(f"Окно отчёта начинается {s}, а история сервера — с {g_start}: «дней из N» и постоянство "
-                        "считаются по окну отчёта, а не по всей истории.")
+        notes.append(f"Окно отчёта начинается {s}, а история сервера — с {g_start}: «дней из N» и постоянство "
+                     "считаются по окну отчёта, а не по всей истории.")
 
     ds = Dataset(
         path=path, title=title, guild_id=gid, is_merged=False, schema=DB_SCHEMA, full_data=True, tz=TZ_NAME,

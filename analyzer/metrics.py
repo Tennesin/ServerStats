@@ -49,6 +49,73 @@ def calendar_days(ds: Dataset) -> pd.DatetimeIndex:
         return pd.DatetimeIndex([])
     return pd.date_range(a, b, freq="D")
 
+def _ok(v) -> bool:
+    """Значение есть (не None и не NaN/NaT)."""
+    return v is not None and not pd.isna(v)
+
+def grouped_channels(ds: Dataset) -> pd.DataFrame:
+    """ds.channels + колонки group_id / group_label / is_thread.
+    Ветка сворачивается в родительский канал (нужен ds.channel_parent, он есть у источника «БД»).
+    У xlsx-источника ветки не различаются: каждый канал сам себе группа."""
+    ch = ds.channels
+    if ch is None or ch.empty:
+        return ch
+    ch = ch.copy()
+    parent = ds.channel_parent or {}
+    labels = dict(zip(ch["channel_id"], ch["channel"]))
+    gid, glabel, thread = [], [], []
+    for cid, label in zip(ch["channel_id"], ch["channel"]):
+        pid = parent.get(cid)
+        if pid is None:
+            gid.append(cid)
+            glabel.append(label)
+            thread.append(False)
+            continue
+        pid = str(pid)
+        gid.append(pid)
+        glabel.append(labels.get(pid) or label.split(" › ")[0])   # родитель без сообщений: имя берём из подписи ветки
+        thread.append(True)
+    ch["group_id"], ch["group_label"], ch["is_thread"] = gid, glabel, thread
+    return ch
+
+def _presence_block(ds: Dataset, writers: set, dormant: set, per_user: pd.Series, days):
+    """Сколько писавших уже нет на сервере и кто вступил в окне. None — снимка присутствия нет."""
+    present = ds.present_ids()
+    if present is None:
+        return None
+    p = ds.presence
+    a, b = days[0].date(), days[-1].date()
+    partial = any(si.snapshot_partial for si in ds.sync_info.values())
+    snaps = [si.snapshot_at for si in ds.sync_info.values() if si.snapshot_at]
+
+    if partial:                                   # список участников был неполным: «ушедший» только если бот видел его уход
+        absent = set(p.loc[p["present"] == 0, "uid"])
+        gone = (writers & absent) - present
+    else:
+        gone = writers - present
+    total = float(per_user.sum())
+    gone_msgs = float(per_user.reindex(list(gone)).fillna(0).sum()) if gone else 0.0
+
+    joined_uids = {r.uid for r in p.itertuples(index=False) if _ok(r.joined) and a <= r.joined <= b}
+    left_rows = sum(1 for r in p.itertuples(index=False)
+                    if r.present == 0 and _ok(r.left) and a <= r.left <= b)
+
+    notes = ["«нет на сервере» — человека не было в списке участников в момент последнего снимка; "
+             "дата ухода приблизительная (когда бот это заметил)",
+             "дата вступления — по данным Discord (при повторном входе обновляется)"]
+    if partial:
+        notes.append("список участников в снимке был неполным: «ушедших» может быть больше, чем показано")
+    if snaps:
+        notes.append(f"снимок присутствия сделан {min(snaps):%d.%m.%Y %H:%M}")
+    return {
+        "writers": len(writers), "gone": len(gone),
+        "gone_share": len(gone) / len(writers) if writers else 0.0,
+        "gone_msg_share": gone_msgs / total if total else 0.0,
+        "dormant_present": len(dormant & present), "dormant_gone": len(dormant & gone),
+        "joined": len(joined_uids), "joined_wrote": len(joined_uids & writers),
+        "left": left_rows, "notes": notes,
+    }
+
 def gini(values) -> float:
     x = np.sort(np.asarray(values, dtype=float))
     n = len(x)
@@ -247,9 +314,14 @@ def server_metrics(ds: Dataset) -> dict:
     since = (days[-1] - g["max"]).dt.days
     dormant = int((since >= DORMANT_DAYS).sum())
     life.update(dormant=dormant, dormant_share=dormant / U)
-    life["rel"] = make_rel(_lvl(D, 14, 28), [
+    life["presence"] = _presence_block(ds, set(per_user.index), set(since.index[since >= DORMANT_DAYS]),
+                                       per_user, days)
+    life_notes = [
         "«первое появление» = первое сообщение в окне, а не вступление на сервер",
-        f"«притих» = нет сообщений последние {DORMANT_DAYS} дн. окна"])
+        f"«притих» = нет сообщений последние {DORMANT_DAYS} дн. окна"]
+    if life["presence"]:
+        life_notes += life["presence"]["notes"]
+    life["rel"] = make_rel(_lvl(D, 14, 28), life_notes)
     out["lifecycle"] = life
 
     # Сравнение с прошлым периодом
@@ -267,20 +339,26 @@ def server_metrics(ds: Dataset) -> dict:
             "rel": make_rel(_lvl(D, 14, 28), ["«новый»/«ушёл» = писал/не писал, а не вступил/покинул сервер"]),
         }
 
-    # Каналы
+    # Каналы (ветки считаются вместе с родительским каналом)
     out["channels"] = None
-    ch = ds.channels
-    if not ch.empty:
-        t = (ch.groupby("channel_id")
-               .agg(channel=("channel", "first"), messages=("n", "sum"), authors=("uid", "nunique"))
+    ch = grouped_channels(ds)
+    if ch is not None and not ch.empty:
+        t = (ch.groupby("group_id")
+               .agg(channel=("group_label", "first"), messages=("n", "sum"), authors=("uid", "nunique"))
                .sort_values("messages", ascending=False))
+        thr = (ch[ch["is_thread"]].groupby("group_id")
+                 .agg(thread_messages=("n", "sum"), threads=("channel_id", "nunique")))
+        t["thread_messages"] = thr["thread_messages"].reindex(t.index).fillna(0).astype(int)
+        t["threads"] = thr["threads"].reindex(t.index).fillna(0).astype(int)
         t["share"] = t["messages"] / t["messages"].sum()
-        k_user = ch.groupby("uid")["channel_id"].nunique()
+        k_user = ch.groupby("uid")["group_id"].nunique()
         out["channels"] = {
             "table": t, "top3_share": float(t["share"].values[:3].sum()),
             "hhi": float((t["share"].values ** 2).sum()),
             "single_channel_share": float((k_user == 1).mean()),
             "mean_channels": float(k_user.mean()),
+            "thread_share": float(t["thread_messages"].sum() / t["messages"].sum()),
+            "thread_count": int(ch.loc[ch["is_thread"], "channel_id"].nunique()),
             "rel": make_rel(_lvl(total_msgs, 300, 2000), []),
         }
 
@@ -453,12 +531,15 @@ def user_metrics(ds: Dataset) -> pd.DataFrame:
     df["reply_share"] = rep / np.maximum(n, 1) if ds.full_data else np.nan
     df["is_staff"] = uids.isin(ds.staff["uid"]) if len(ds.staff) else False
 
-    # Каналы
+    # Каналы (ветки считаются вместе с родительским каналом)
     for c in ("channels_used", "top_channel", "top_channel_share", "channel_entropy"):
         df[c] = np.nan if c != "top_channel" else ""
-    ch = ds.channels[ds.channels["n"] > 0] if len(ds.channels) else ds.channels
-    if len(ch):
-        ch = ch.copy()
+    ch = grouped_channels(ds)
+    if ch is not None and len(ch):
+        ch = ch[ch["n"] > 0]
+    if ch is not None and len(ch):
+        ch = (ch.groupby(["uid", "group_id", "group_label"], as_index=False)["n"].sum()
+                .rename(columns={"group_label": "channel"}))
         ch["tot"] = ch.groupby("uid")["n"].transform("sum")
         ch["p"] = ch["n"] / ch["tot"]
         ch["plogp"] = -(ch["p"] * np.log(ch["p"]))
@@ -803,4 +884,48 @@ def reaction_server_metrics(ds: Dataset, um: pd.DataFrame, sm: dict = None) -> d
             top_pairs["src_name"] = [names.get(u) or u for u in top_pairs["src"]]
             top_pairs["dst_name"] = [names.get(u) or u for u in top_pairs["dst"]]
             out["pairs"] = top_pairs
+    return out
+
+# ---------- Присутствие и роли ----------
+
+def presence_user_metrics(ds: Dataset, um: pd.DataFrame) -> pd.DataFrame:
+    """Личные факты: на сервере ли человек, когда вступил/ушёл, какие у него роли. Нет снимка — пусто."""
+    cols = ["in_server", "joined", "left_date", "first_seen", "server_roles"]
+    out = pd.DataFrame(index=um.index, columns=cols, dtype=object)
+    out["server_roles"] = ""
+    if um.empty:
+        return out
+
+    if getattr(ds, "has_presence", False) and len(ds.presence):
+        partial = any(si.snapshot_partial for si in ds.sync_info.values())
+        agg: dict = {}
+        for r in ds.presence.itertuples(index=False):
+            a = agg.setdefault(r.uid, {"present": 0, "joined": None, "first": None, "left": None})
+            a["present"] = max(a["present"], int(r.present))
+            if _ok(r.joined) and (a["joined"] is None or r.joined < a["joined"]):
+                a["joined"] = r.joined
+            if _ok(r.first_seen) and (a["first"] is None or r.first_seen < a["first"]):
+                a["first"] = r.first_seen
+            if _ok(r.left) and (a["left"] is None or r.left > a["left"]):
+                a["left"] = r.left
+        for uid in um.index:
+            a = agg.get(uid)
+            if a is None:                          # бот никогда не видел человека на сервере
+                out.at[uid, "in_server"] = None if partial else False
+                continue
+            here = a["present"] == 1
+            out.at[uid, "in_server"] = here
+            out.at[uid, "joined"] = a["joined"]
+            out.at[uid, "first_seen"] = a["first"]
+            out.at[uid, "left_date"] = None if here else a["left"]
+
+    if getattr(ds, "has_roles", False) and len(ds.member_roles):
+        multi = ds.member_roles["server"].nunique() > 1
+        text: dict = {}
+        for r in ds.member_roles.itertuples(index=False):
+            if r.uid in out.index and r.roles:
+                chunk = ", ".join(r.roles)
+                text.setdefault(r.uid, []).append(f"{r.server}: {chunk}" if multi else chunk)
+        for uid, parts in text.items():
+            out.at[uid, "server_roles"] = "; ".join(parts)
     return out

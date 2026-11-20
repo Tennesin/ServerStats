@@ -71,6 +71,18 @@ def chart_dau(series):
     _fmt_dates(ax)
     return _png(fig)
 
+def chart_audit_days(df, days):
+    if df is None or df.empty:
+        return None
+    s = df.set_index("date")["count"].reindex(days, fill_value=0)
+    if s.sum() == 0:
+        return None
+    fig, ax = plt.subplots(figsize=(9, 3.0))
+    ax.bar(s.index, s.values, color=ORANGE, width=0.8)
+    ax.set_title("Записи журнала аудита по дням")
+    _fmt_dates(ax)
+    return _png(fig)
+
 def chart_weekdays(avg):
     if not avg or sum(avg) == 0:
         return None

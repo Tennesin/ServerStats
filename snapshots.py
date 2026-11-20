@@ -104,6 +104,7 @@ async def _save(guild: discord.Guild):
         db.executemany("INSERT INTO role_snapshot VALUES (?,?,?,?,?,?,?,?,?,?,?)", role_rows)
 
     set_meta(db, f"snapshot_ts:{gid}", now)
+    set_meta(db, f"guild_name:{gid}", guild.name)
     set_meta(db, f"snapshot_partial:{gid}", "1" if partial else "0")
     log.info("[%s] снимок сохранён: участников %d, ролей %d, администрации %d%s",
              guild.name, len(presence), len(role_rows), len(staff),

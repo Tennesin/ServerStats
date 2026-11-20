@@ -60,6 +60,8 @@ USER_COLUMNS = [
     ("G управление", "G", "dec"), ("B охват", "B", "dec"),
     ("Обращений к нему", "appeals_in", "int"), ("Действий аудита (взвеш.)", "g_audit", "dec1"),
     ("Роль", "role", "text"),
+    ("На сервере", "in_server", "text"), ("Вступил(а)", "joined", "text"),
+    ("Покинул(а), ≈", "left_date", "text"), ("Роли на сервере", "server_roles", "text"),
     ("Эмодзи всего", "emoji_uses", "int"), ("Эмодзи на сообщение", "emoji_per_msg", "dec"),
     ("Сообщений «только эмодзи»", "emoji_only_msgs", "int"),
     ("Доля «только эмодзи»", "emoji_only_share", "pct"),
@@ -149,7 +151,7 @@ def build_summary_xlsx(items: list, path):
         for r, (_uid, row) in enumerate(df.iterrows(), start=1):
             for c, (_h, key, f) in enumerate(USER_COLUMNS):
                 _put(ws, r, c, row[key], F[f])
-        wide = {"top_channel", "role", "emoji_top_label", "rx_top_label", "rx_given_top_label"}
+        wide = {"top_channel", "role", "emoji_top_label", "rx_top_label", "rx_given_top_label", "server_roles"}
         for c, (_h, key, _f) in enumerate(USER_COLUMNS):
             if key in wide:
                 width = 30
