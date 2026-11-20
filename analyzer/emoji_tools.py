@@ -1,17 +1,6 @@
 """Помощники для эмодзи в анализаторе: показ символа и подписи. Без сети."""
-
-import re
-
-_SKIN = re.compile("[\U0001F3FB-\U0001F3FF]")
-_VS = re.compile("[\uFE0E\uFE0F]")
-_GENDER = re.compile("\u200d[\u2640\u2642]$")
-
-_DISPLAY = None
-
-def normalize_unicode(ch: str) -> str:
-    """Те же правила слияния, что в emoji_utils.py бота."""
-    s = _VS.sub("", _SKIN.sub("", ch))
-    return _GENDER.sub("", s)
+import botroot
+from emoji_utils import normalize_unicode
 
 def _build_display_map() -> dict:
     """нормализованный символ -> полная форма для красивого показа (с FE0F, где нужно)."""

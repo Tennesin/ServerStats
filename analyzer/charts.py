@@ -156,29 +156,6 @@ def chart_channels(table, top: int = 10):
     ax.set_title(f"Топ каналов по сообщениям (до {top})")
     return _png(fig)
 
-def chart_szp_top(sz, um, n: int = 15):
-    if sz is None or sz.empty:
-        return None
-    top = sz.head(n)
-    W = S.SZP_WEIGHTS
-    colors = ["#2E7BB8", "#2E9E5B", "#9B59B6", "#E4A62E", "#8A8F98"]
-    fig, ax = plt.subplots(figsize=(9, 0.42 * len(top) + 1.8))
-    left = np.zeros(len(top))
-    for col, k in zip(colors, W):
-        vals = top[k].fillna(0).values * W[k] * 100
-        ax.barh(range(len(top)), vals, left=left, color=col, label=f"{k} · {S.SZP_NAMES[k]}")
-        left += vals
-    ax.set_yticks(range(len(top)))
-    ax.set_yticklabels([_lab(um.loc[u, "name"]) for u in top.index])
-    ax.invert_yaxis()
-    for i, v in enumerate(left):
-        ax.text(v + 0.8, i, f"{v:.1f}", va="center", fontsize=8)
-    ax.set_xlim(0, max(10.0, float(left.max()) * 1.12))
-    ax.set_xlabel("баллы СЗП (вклад компонентов)")
-    ax.set_title(f"Топ-{len(top)} по СЗП")
-    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.15), ncol=3, frameon=False, fontsize=8)
-    return _png(fig)
-
 # ---------- Пользователь ----------
 
 def chart_user_days(series, name: str = ""):

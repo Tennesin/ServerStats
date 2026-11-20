@@ -574,7 +574,7 @@ def build_server_html(ds, sm, um, sk, linked, emoji_html: str = "", admin_html: 
 
 # ---------- Индивидуальный отчёт ----------
 
-def _explain(ds, s, r, D) -> dict:
+def _explain(s, r) -> dict:
     """Короткие пояснения к компонентам СЗП для индивидуального отчёта."""
     a = int(r["active_days"])
     msgs = int(r["messages"])
@@ -586,7 +586,7 @@ def _explain(ds, s, r, D) -> dict:
              f"из последних {S.SZP_RECENT_DAYS} дн. активен {int(s['d_recent'])}")
 
     if _bad(s["O"]):
-        o = "нет данных об обращениях и реакциях (файл старого формата)"
+        o = "нет данных об обращениях и реакциях"
     else:
         o = (f"обращений к нему {int(s['appeals_in'])} от {int(s['addressers'])} чел.; "
              f"реакций получено {int(s['rx_recv_n'])}")
@@ -598,7 +598,7 @@ def _explain(ds, s, r, D) -> dict:
     g = f"роль: {r['role'] or 'без роли администрации'} (значение {s['g_role']:.2f}); {aud}"
 
     if _bad(s["B"]):
-        b = "нет данных по каналам (файл старого формата)"
+        b = "нет данных по значимым каналам"
     else:
         b = (f"значимых каналов, где ≥{S.SZP_B_MIN_MSGS} сообщений: "
              f"{int(s['b_present'])} из {int(s['b_sig'])}")
@@ -711,9 +711,7 @@ def build_user_html(ds, uid, um, sk, days, avatar=None, emoji_html: str = "", st
         box += (f"<br>Активность пачками: три самых активных дня дали {pct(r['burst_share'])} "
                 "сообщений, поэтому выводы о динамике и привычном времени ориентировочные.")
     if ds.incomplete:
-        box += "<br>Сбор данных был остановлен вручную: все цифры неполные."
-    if ds.filtered:
-        box += f"<br>Отчёт построен с фильтром ({esc(ds.filtered)}): это не весь сервер."
+        box += "<br>Последняя синхронизация была остановлена вручную: цифры могут быть неполными."
     b.append(f'<div class="box">{box}</div>')
 
     cards = [
@@ -727,13 +725,12 @@ def build_user_html(ds, uid, um, sk, days, avatar=None, emoji_html: str = "", st
         card("Последнее сообщение", str(r["last_date"]), f"{int(r['days_since_last'])} дн. до конца окна"),
         card("Тренд", r["trend"], _trend_hint(r)),
     ]
-    if ds.full_data:
-        cards.append(card("Ответы", pct(r["reply_share"]), f"{int(r['replies'])} шт."))
+    cards.append(card("Ответы", pct(r["reply_share"]), f"{int(r['replies'])} шт."))
     b.append('<div class="cards">' + "".join(cards) + "</div>")
 
     # Компоненты СЗП
     b.append(h2("Из чего сложился СЗП"))
-    expl = _explain(ds, s, r, D)
+    expl = _explain(s, r)
     rows = []
     for k in W:
         v = s[k]

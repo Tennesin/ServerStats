@@ -7,7 +7,6 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Optional
-
 import pandas as pd
 
 import settings as S
@@ -22,8 +21,6 @@ from dataset import (
     USER_COLS, Dataset, LoaderError, SyncInfo,
 )
 from rules import build_identity, build_rules, build_spam_rules
-
-DB_SCHEMA = 5          # «схема данных» у источника «БД» (у xlsx было 1-4)
 
 # ---------- Мелкие помощники ----------
 
@@ -388,12 +385,12 @@ def _load_guild(db, path: Path, gid: int, title: str, s: date, e: date, compare:
                      "считаются по окну отчёта, а не по всей истории.")
 
     ds = Dataset(
-        path=path, title=title, guild_id=gid, is_merged=False, schema=DB_SCHEMA, full_data=True, tz=TZ_NAME,
+        path=path, title=title, guild_id=gid, is_merged=False, tz=TZ_NAME,
         period_text="", declared_start=s, declared_end=e,
         data_start=daily["date"].min().date() if len(daily) else None,
         data_end=daily["date"].max().date() if len(daily) else None,
-        incomplete=incomplete, truncated=False, compare=compare and len(prev_daily) > 0,
-        meta={"Источник": "БД", "База": str(path)}, notes=notes, excluded=excluded,
+        incomplete=incomplete, compare=compare and len(prev_daily) > 0,
+        notes=notes, excluded=excluded,
         users=users, daily=daily, prev_daily=prev_daily, channels=channels, heat=heat, heat_total=heat_total,
         servers=_empty(SERVER_COLS), staff=staff, warnings=warnings,
         reply_pairs=reply_pairs, reply_unresolved=unresolved, reply_self_or_bot=self_or_bot,
@@ -403,8 +400,7 @@ def _load_guild(db, path: Path, gid: int, title: str, s: date, e: date, compare:
         reaction_msgs=r_msgs, reaction_pairs=r_pairs, reaction_names=r_names,
         reaction_self_or_bot=r_self_bot, reaction_unattributed=r_unattr,
         has_audit=audit["mode"] in (1, 3), audit_mode=audit["mode"], audit_users=audit["users"],
-        server_start=g_start, admin_events=audit["events"],
-        source="db", guild_ids=[gid], audit_actions=audit["actions"], audit_days=audit["days"],
+        admin_events=audit["events"], audit_actions=audit["actions"], audit_days=audit["days"],
         audit_total=audit["total"], audit_skipped=audit["skipped"], audit_unknown_actor=audit["unknown"],
         has_presence=has_presence, presence=presence, has_roles=len(role_table) > 0,
         member_roles=member_roles, role_table=role_table, channel_parent=channel_parent,
@@ -480,7 +476,7 @@ def _load_audit(db, gid, s, e, ident, info, names, person, notes, warnings, sync
 
 # ---------- Суммарный набор ----------
 
-def _merge(items: list, s: date, label: str, path: Path) -> Dataset:
+def _merge(items: list, label: str, path: Path) -> Dataset:
     def cat(attr):
         return [getattr(d, attr) for d in items]
 
@@ -558,13 +554,12 @@ def _merge(items: list, s: date, label: str, path: Path) -> Dataset:
     dstart = min(d.declared_start for d in items)
 
     return Dataset(
-        path=path, title=f"Суммарно по серверам: {len(items)}", guild_id=None, is_merged=True,
-        schema=DB_SCHEMA, full_data=True, tz=TZ_NAME,
+        path=path, title=f"Суммарно по серверам: {len(items)}", guild_id=None, is_merged=True, tz=TZ_NAME,
         period_text=_period_text(label, dstart, items[0].declared_end),
         declared_start=dstart, declared_end=items[0].declared_end,
         data_start=min(starts) if starts else None, data_end=max(ends) if ends else None,
-        incomplete=any(d.incomplete for d in items), truncated=False, compare=have_prev,
-        meta={"Источник": "БД", "База": str(path)}, notes=prefixed("notes"), excluded=prefixed("excluded"),
+        incomplete=any(d.incomplete for d in items), compare=have_prev,
+        notes=prefixed("notes"), excluded=prefixed("excluded"),
         users=users, daily=daily,
         prev_daily=_sum(cat("prev_daily"), ["uid", "date"], DAILY_COLS, "date") if have_prev
         else _empty(DAILY_COLS, "date"),
@@ -586,9 +581,9 @@ def _merge(items: list, s: date, label: str, path: Path) -> Dataset:
         reaction_self_or_bot=sum(d.reaction_self_or_bot for d in items),
         reaction_unattributed=sum(d.reaction_unattributed for d in items),
         has_audit=amode in (1, 3, 4), audit_mode=amode, audit_users=audit_users,
-        server_start=dstart, admin_events=frames("admin_events", ADMIN_EVENT_COLS),
-        source="db", guild_ids=[g for d in items for g in d.guild_ids], audit_actions=audit_actions,
-        audit_days=audit_days, audit_total=sum(d.audit_total for d in items),
+        admin_events=frames("admin_events", ADMIN_EVENT_COLS),
+        audit_actions=audit_actions, audit_days=audit_days,
+        audit_total=sum(d.audit_total for d in items),
         audit_skipped=sum(d.audit_skipped for d in items),
         audit_unknown_actor=sum(d.audit_unknown_actor for d in items),
         has_presence=all(d.has_presence for d in items), presence=frames("presence", PRESENCE_COLS),
@@ -652,7 +647,7 @@ def load_db(db_path=None, guild_ids=None, period=None, start=None, end=None,
             raise LoaderError("Нет данных для анализа: ни один сервер не подошёл.")
         out = list(items)
         if len(items) > 1:
-            out.append(_merge(items, s, label, path))
+            out.append(_merge(items, label, path))
         return out, period_folder_name(s, e, with_year=True)
     finally:
         db.close()

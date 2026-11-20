@@ -44,11 +44,10 @@ def describe(ds: Dataset):
         print(f"  Есть предыдущий период: строк {len(ds.prev_daily)}")
     if len(ds.staff):
         print(f"  Администрация:   {len(ds.staff)} чел.")
-    print(f"  Присутствие:     {'снимок есть' if ds.has_presence else 'снимка нет (выполните -sync)'}"
-          f"  |  роли: {'есть' if ds.has_roles else 'нет'}"
-          f"  |  журнал аудита: {ds.audit_total} зап." if ds.has_audit
-          else f"  Присутствие:     {'снимок есть' if ds.has_presence else 'снимка нет (выполните -sync)'}"
-               f"  |  роли: {'есть' if ds.has_roles else 'нет'}  |  журнал аудита: нет")
+    presence = "снимок есть" if ds.has_presence else "снимка нет (выполните -sync)"
+    roles = "есть" if ds.has_roles else "нет"
+    audit = f"{ds.audit_total} зап." if ds.has_audit else "нет"
+    print(f"  Присутствие:     {presence}  |  роли: {roles}  |  журнал аудита: {audit}")
     if ds.warnings:
         print("  Предупреждения:")
         for w in ds.warnings:

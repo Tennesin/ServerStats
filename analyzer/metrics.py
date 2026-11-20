@@ -54,9 +54,7 @@ def _ok(v) -> bool:
     return v is not None and not pd.isna(v)
 
 def grouped_channels(ds: Dataset) -> pd.DataFrame:
-    """ds.channels + колонки group_id / group_label / is_thread.
-    Ветка сворачивается в родительский канал (нужен ds.channel_parent, он есть у источника «БД»).
-    У xlsx-источника ветки не различаются: каждый канал сам себе группа."""
+    """ds.channels + колонки group_id / group_label / is_thread."""
     ch = ds.channels
     if ch is None or ch.empty:
         return ch
@@ -137,15 +135,8 @@ def base_reliability(ds: Dataset, days_n: int, users_n: int) -> dict:
         notes.append("мало пользователей: распределения и сегменты неустойчивы")
     if ds.incomplete:
         lv -= 1
-        notes.append("сбор остановлен вручную: данные неполные")
-    if ds.truncated:
-        lv -= 1
-        notes.append("данные по дням обрезаны лимитом строк")
-    if getattr(ds, "filtered", ""):
-        lv = 0
-        notes.append("отчёт с фильтром, это не весь сервер: " + ds.filtered)
+        notes.append("последняя синхронизация остановлена вручную: данные неполные")
     return make_rel(lv, notes)
-
 
 # ---------- Блоки метрик сервера ----------
 
@@ -264,7 +255,7 @@ def server_metrics(ds: Dataset) -> dict:
     dau = daily.groupby("date")["uid"].nunique().reindex(days, fill_value=0)
     out["series"] = pd.DataFrame({"messages": tot, "dau": dau})
 
-    replies_total = int(ds.users["replies"].sum()) if ds.full_data and len(ds.users) else None
+    replies_total = int(ds.users["replies"].sum())
     out["overview"] = {
         "active_days": int((tot > 0).sum()),
         "avg_per_day": total_msgs / D,
@@ -528,7 +519,7 @@ def user_metrics(ds: Dataset) -> pd.DataFrame:
     df["role"] = info["role"].reindex(uids).fillna("").values
     rep = info["replies"].reindex(uids).fillna(0).values.astype(int)
     df["replies"] = rep
-    df["reply_share"] = rep / np.maximum(n, 1) if ds.full_data else np.nan
+    df["reply_share"] = rep / np.maximum(n, 1)
     df["is_staff"] = uids.isin(ds.staff["uid"]) if len(ds.staff) else False
 
     # Каналы (ветки считаются вместе с родительским каналом)
@@ -585,7 +576,7 @@ def user_metrics(ds: Dataset) -> pd.DataFrame:
     lv = np.where((n >= 50) & (ad >= 7), 2, np.where((n >= 10) & (ad >= 3), 1, 0))
     if D < MIN_TREND_DAYS:
         lv = np.minimum(lv, 1)
-    if ds.incomplete or ds.truncated:
+    if ds.incomplete:
         lv = np.maximum(lv - 1, 0)
     df["reliability"] = [LEVELS[i] for i in lv]
 
@@ -805,10 +796,6 @@ def reaction_server_metrics(ds: Dataset, um: pd.DataFrame, sm: dict = None) -> d
         if ds.reaction_unattributed:
             notes.append(f"у {ds.reaction_unattributed} реакций автор неизвестен (супер-реакции, лимит или ошибка): "
                          "они учтены как «получено», но не очищены от ботов и не входят в «поставлено»")
-        if ds.reaction_capped:
-            notes.append("достигнут лимит запросов: часть реакций собрана только счётчиками")
-        if ds.reaction_errors:
-            notes.append(f"ошибок при чтении авторов реакций: {ds.reaction_errors}")
     else:
         notes.append("режим «счётчики»: в числа входят реакции ботов и самореакции авторов, "
                      "а кто ставил реакции — неизвестно (для этого нужен режим «полный»)")

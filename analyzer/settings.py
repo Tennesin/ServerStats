@@ -1,4 +1,6 @@
 """Настройки автономного анализатора: подписи, СЗП, отбор для индивидуальных отчётов."""
+import botroot
+from config import AUDIT_RETENTION_DAYS
 
 WEEKDAYS = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
 KIND_RU = {"owner": "Основатель", "admin": "Админ"}
@@ -43,7 +45,6 @@ SZP_AUDIT_WEIGHTS = {
 }
 SZP_AUDIT_DEFAULT = 1.0
 SZP_AUDIT_IGNORE_PREFIX = "unknown_"      # неопознанные коды Discord не считаются
-AUDIT_RETENTION_DAYS = 45                 # столько Discord хранит журнал аудита
 
 # B — охват
 SZP_SIG_CHANNEL = 0.02    # значимый канал: даёт >= 2% сообщений сервера

@@ -47,22 +47,18 @@ class SyncInfo:
 
 @dataclass
 class Dataset:
-    path: Path                       # у источника «БД» — путь к файлу базы
+    path: Path                       # путь к файлу базы
     title: str
     guild_id: Optional[int]
     is_merged: bool
-    schema: int
-    full_data: bool                  # есть ли разбивка по каналам, часам и т. д. (у БД всегда True)
     tz: str
     period_text: str
     declared_start: Optional[date]
     declared_end: Optional[date]
     data_start: Optional[date]       # фактически первая и последняя даты с сообщениями
     data_end: Optional[date]
-    incomplete: bool                 # сбор был остановлен вручную
-    truncated: bool                  # «По дням (список)» обрезан лимитом (только xlsx)
+    incomplete: bool                 # последняя синхронизация остановлена вручную
     compare: bool
-    meta: dict
     notes: list
     excluded: list
     users: pd.DataFrame
@@ -74,13 +70,12 @@ class Dataset:
     servers: pd.DataFrame
     staff: pd.DataFrame
     warnings: list = field(default_factory=list)
-    filtered: str = ""
     reply_pairs: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=REPLY_COLS))
     reply_unresolved: int = 0
     reply_self_or_bot: int = 0
     mention_pairs: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=REPLY_COLS))
     address_pairs: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=REPLY_COLS))
-    has_emoji: bool = False
+    has_emoji: bool = False          # в базе есть текст сообщений (иначе эмодзи не разобрать)
     emoji_user: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=EMOJI_USER_COLS))
     emoji_info: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=EMOJI_INFO_COLS))
     emoji_days: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=EMOJI_DAY_COLS))
@@ -94,28 +89,23 @@ class Dataset:
     reaction_names: dict = field(default_factory=dict)
     reaction_self_or_bot: int = 0
     reaction_unattributed: int = 0
-    reaction_capped: int = 0
-    reaction_errors: int = 0
-    # Журнал аудита и начало истории сервера
+    # Журнал аудита
     has_audit: bool = False
     audit_mode: int = 0              # 1 собран, 2 нет доступа, 3 ошибка, 4 собран не по всем серверам
     audit_users: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=AUDIT_USER_COLS))
-    server_start: Optional[date] = None
     admin_events: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=ADMIN_EVENT_COLS))
-
-    source: str = "db"               # источник данных
-    guild_ids: list = field(default_factory=list)       # серверы, вошедшие в набор (в суммарном — несколько)
     audit_actions: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=AUDIT_ACTION_COLS))
     audit_days: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=AUDIT_DAY_COLS))
     audit_total: int = 0
     audit_skipped: int = 0
     audit_unknown_actor: int = 0
+    # Присутствие и роли
     has_presence: bool = False       # есть ли снимок присутствия (иначе «нет на сервере» утверждать нельзя)
     presence: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=PRESENCE_COLS))
     has_roles: bool = False
     member_roles: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=MEMBER_ROLE_COLS))
     role_table: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=ROLE_COLS))
-    channel_parent: dict = field(default_factory=dict)  # channel_id (строка) -> ID родительского канала (для веток)
+    channel_parent: dict = field(default_factory=dict)  # channel_id (строка) -> ID родительского канала
     sync_info: dict = field(default_factory=dict)       # название сервера -> SyncInfo
 
     @property
