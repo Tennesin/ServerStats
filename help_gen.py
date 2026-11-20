@@ -207,9 +207,10 @@ def build_text() -> str:
     add("")
     add("  python analyze.py [параметры]")
     add(wrap("Запускать из папки analyzer. Без параметров — вся история всех серверов. Результат: папка "
-             "analyzer/analysis/<период>/<сервер>/ (report.html и users/*.html) и файл "
-             "analysis_summary.xlsx в папке периода. При нескольких серверах дополнительно строится "
-             "набор «Суммарно».", 6))
+             "ANALYSIS_DIR (analyzer/settings.py, по умолчанию d:\\Суетологи\\analyze)\\ГГГГ-ММ\\<период>\\"
+             "<сервер>\\ (report.html и users/*.html) и файл analysis_summary.xlsx в папке периода; "
+             "отчёты за всю историю — в ANALYSIS_ALLDAY_DIR (по умолчанию analyze\\09_alldays). "
+             "При нескольких серверах дополнительно строится набор «Суммарно».", 6))
     add("")
     for opt, desc in (
         ("--db ПУТЬ", "путь к stats.db (по умолчанию — база рядом с ботом). Если копируете базу, "

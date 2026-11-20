@@ -18,6 +18,8 @@ def _build_display_map() -> dict:
         pass
     return m
 
+_DISPLAY = None
+
 def display_unicode(ch: str) -> str:
     global _DISPLAY
     if _DISPLAY is None:

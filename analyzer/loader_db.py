@@ -272,10 +272,10 @@ def _load_guild(db, path: Path, gid: int, title: str, s: date, e: date, compare:
             r_recv["uid"] = r_recv["uid"].astype(str)
         if msg_ids:
             owner = rq.drop_duplicates("message_id").set_index("message_id")["uid"]
-            m_cnt = owner.loc[owner.index.isin(msg_ids)].groupby(owner.loc[owner.index.isin(msg_ids)]).size()
-            r_msgs = m_cnt.reset_index()
+            owner = owner[owner.index.isin(msg_ids)]
+            r_msgs = pd.DataFrame({"uid": owner.astype(str).values})
+            r_msgs = r_msgs.groupby("uid", as_index=False).size()
             r_msgs.columns = REACTION_MSG_COLS
-            r_msgs["uid"] = r_msgs["uid"].astype(str)
     if spam_filtered:
         notes.append(f"Количество эмодзи и реакций, подвергшихся антиспам-фильтрации: {spam_filtered}.")
 

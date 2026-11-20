@@ -1,6 +1,11 @@
 """Настройки автономного анализатора: подписи, СЗП, отбор для индивидуальных отчётов."""
+import os
 import botroot
 from config import AUDIT_RETENTION_DAYS
+
+# ---------- Куда сохранять отчёты анализатора ----------
+ANALYSIS_DIR = os.environ.get("ANALYSIS_DIR") or r"d:\Суетологи\analyze"
+ANALYSIS_ALLDAY_DIR = os.environ.get("ANALYSIS_ALLDAY_DIR") or os.path.join(ANALYSIS_DIR, "09_allday")
 
 WEEKDAYS = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
 KIND_RU = {"owner": "Основатель", "admin": "Админ"}

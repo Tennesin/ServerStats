@@ -29,6 +29,7 @@ from report_xlsx import build_summary_xlsx
 from scoring import compute_szp
 from settings import WEEKDAYS
 from avatars import fetch_avatar
+from config import build_period, period_folder_name
 
 def describe(ds: Dataset):
     kind = "СУММАРНЫЙ НАБОР" if ds.is_merged else "Сервер"
@@ -126,6 +127,13 @@ def make_reports(ds: Dataset, out_dir: Path, args):
         build_server_html(ds, sm, um, sk, linked, server_emoji, server_admin), encoding="utf-8")
     return folder, {"ds": ds, "sm": sm, "um": um, "sk": sk, "em": em, "rx": rx}
 
+def default_out_dir(start, end, key: str) -> Path:
+    """Папка отчётов по умолчанию: analyze/ГГГГ-ММ/<период> или analyze/09_alldays/<период> для всей истории."""
+    if key == "all":
+        return Path(S.ANALYSIS_ALLDAY_DIR) / period_folder_name(start, end, with_year=True)
+    ref = end or start
+    return Path(S.ANALYSIS_DIR) / ref.strftime("%Y-%m") / period_folder_name(start, end)
+
 def _from_db(args):
     """Основной режим: чтение из stats.db. Возвращает (список Dataset, папка вывода по умолчанию)."""
     period = args.period
@@ -134,15 +142,19 @@ def _from_db(args):
             raise LoaderError("Укажите либо --period, либо --last.")
         last = args.last.strip().lower()
         period = last if last.startswith("last") else "last" + last
-    tokens = [t for t in args.servers.replace(",", " ").split() if t]
+    tokens = [t for part in args.servers for t in part.replace(",", " ").split() if t]
     if not tokens or any(t.lower() == "all" for t in tokens):
         ids = None
     elif all(t.isdigit() for t in tokens):
         ids = [int(t) for t in tokens]
     else:
         raise LoaderError("--servers: ID серверов через запятую или all.")
-    loaded, folder = load_db(args.db, ids, period, args.start, args.end, args.compare, args.reactions)
-    return loaded, Path(__file__).resolve().parent / "analysis" / folder
+    try:
+        s, e, key, _label = build_period(period, args.start, args.end, args.compare)
+    except ValueError as ex:
+        raise LoaderError(str(ex))
+    loaded, _folder = load_db(args.db, ids, period, args.start, args.end, args.compare, args.reactions)
+    return loaded, default_out_dir(s, e, key)
 
 def _pct(x) -> str:
     return "—" if x is None or x != x else f"{x * 100:.1f}%"
