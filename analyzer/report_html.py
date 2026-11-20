@@ -2,9 +2,9 @@
 import pandas as pd
 import html
 import json
+import re
 from datetime import datetime, timedelta
 from urllib.parse import quote
-
 import numpy as np
 
 import charts as C
@@ -51,6 +51,19 @@ summary{cursor:pointer;font-weight:600}
 .theme-toggle{display:inline-flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;
 background:var(--card);border:1px solid var(--line);border-radius:8px;padding:4px 10px;margin:0 0 12px}
 .theme-toggle input{width:15px;height:15px;cursor:pointer}
+.key{border-left:4px solid var(--accent)}
+.key ul{margin:6px 0 0 20px}
+details.sec{background:var(--card);border:1px solid var(--line);border-radius:10px;margin:12px 0}
+details.sec>summary{cursor:pointer;list-style:none;padding:10px 14px;display:flex;align-items:center;gap:10px}
+details.sec>summary::-webkit-details-marker{display:none}
+details.sec>summary::before{content:"▸";color:var(--accent);font-size:16px;flex:none}
+details.sec[open]>summary::before{content:"▾"}
+details.sec>summary h2{margin:0;padding:0;border:0;font-size:18px}
+details.sec[open]>summary{border-bottom:1px solid var(--line)}
+.secbody{padding:4px 14px 12px}
+.toolbar{display:inline-flex;gap:8px;margin:0 0 12px 10px}
+.toolbar button{font:inherit;font-size:13px;cursor:pointer;color:var(--ink);background:var(--card);
+border:1px solid var(--line);border-radius:8px;padding:4px 10px}
 """
 
 _REL_CLASS = {"высокая": "hi", "средняя": "mid", "низкая": "lo"}
@@ -82,9 +95,11 @@ def badge(level: str) -> str:
 def ul(items) -> str:
     return "<ul>" + "".join(f"<li>{esc(i)}</li>" for i in items) + "</ul>"
 
-def h2(text: str, rel=None) -> str:
+def h2(text: str, rel=None, open: bool = False) -> str:
+    """Заголовок раздела."""
     extra = f' <span class="muted">достоверность:</span> {badge(rel["level"])}' if rel else ""
-    return f"<h2>{esc(text)}{extra}</h2>"
+    mark = ' data-open="1"' if open else ""
+    return f"<h2{mark}>{esc(text)}{extra}</h2>"
 
 def card(label, value, hint: str = "") -> str:
     h = f'<div class="h">{esc(hint)}</div>' if hint else ""
@@ -124,14 +139,41 @@ _THEME_TOGGLE = (
     "try{localStorage.setItem('theme',t);}catch(e){}});})();</script>"
 )
 
+_H2_RE = re.compile(r'<h2( data-open="1")?>(.*?)</h2>', re.S)
+
+def _fold(body: str) -> str:
+    """Всё, что стоит до первого <h2> (шапка, карточки), остаётся на виду.
+    Каждый раздел от <h2> до следующего <h2> превращается в сворачиваемый блок."""
+    found = list(_H2_RE.finditer(body))
+    if not found:
+        return body
+    out = [body[:found[0].start()]]
+    for i, m in enumerate(found):
+        end = found[i + 1].start() if i + 1 < len(found) else len(body)
+        opened = " open" if m.group(1) else ""
+        out.append(f'<details class="sec"{opened}><summary><h2>{m.group(2)}</h2></summary>'
+                   f'<div class="secbody">{body[m.end():end]}</div></details>')
+    return "".join(out)
+
+_TOOLBAR = (
+    '<div class="toolbar"><button type="button" id="sec-open">Развернуть все разделы</button>'
+    '<button type="button" id="sec-close">Свернуть все</button></div>'
+    "<script>(function(){function all(v){var d=document.querySelectorAll('details.sec');"
+    "for(var i=0;i<d.length;i++){d[i].open=v;}}"
+    "document.getElementById('sec-open').onclick=function(){all(true);};"
+    "document.getElementById('sec-close').onclick=function(){all(false);};})();</script>"
+)
+
 def page(title: str, body: str) -> str:
     stamp = datetime.now().strftime("%d.%m.%Y %H:%M")
+    body = _fold(body)
+    bar = _TOOLBAR if '<details class="sec"' in body else ""
     return (
         '<!doctype html><html lang="ru" data-theme="dark"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
         f"{_THEME_HEAD_JS}"
         f"<title>{esc(title)}</title><style>{CSS}</style></head><body><div class=\"wrap\">"
-        f'{_THEME_TOGGLE}{body}<p class="muted">Сформировано: {stamp}</p></div></body></html>'
+        f'{_THEME_TOGGLE}{bar}{body}<p class="muted">Сформировано: {stamp}</p></div></body></html>'
     )
 
 def _link(uid, name, linked, prefix: str = "users/"):
@@ -370,6 +412,25 @@ def szp_widget_html(sk, um, linked) -> str:
 
 # ---------- Отчёт по серверу ----------
 
+def _key_findings(ds, sm, um, sk) -> str:
+    """Короткий блок «Главное»."""
+    ov, d, tr, lc, t = sm["overview"], sm["distribution"], sm["trend"], sm["lifecycle"], sm["time"]
+    items = []
+    if tr["available"]:
+        items.append(f"Динамика: {tr['direction']} (последние {tr['window']} дн. к предыдущим: "
+                     f"{pct(tr['recent_change'], True)}).")
+    items.append(f"Активность распределена так: топ-5 пишут {pct(d['top5'])} сообщений, "
+                 f"половину сообщений пишут {d['users_for_50']} чел. (Джини {d['gini']:.2f}).")
+    if t:
+        items.append(f"Пик активности: {t['peak_hour']:02d}:00, самый активный день недели — "
+                     f"{S.WEEKDAYS[t['peak_weekday']]}.")
+    items.append(f"Притихли (нет сообщений последние {M.DORMANT_DAYS} дн.): {lc['dormant']} чел. "
+                 f"({pct(lc['dormant_share'])}).")
+    if len(sk):
+        top = [f"{um.loc[uid, 'name']} ({sk.loc[uid, 'szp']:.0f})" for uid in sk.head(3).index]
+        items.append("Самые значимые по СЗП: " + ", ".join(top) + ".")
+    return '<div class="box key"><b>Главное</b>' + ul(items) + "</div>"
+
 def build_server_html(ds, sm, um, sk, linked, emoji_html: str = "", admin_html: str = "") -> str:
     rel = sm["reliability"]
     kind = "Суммарный отчёт" if ds.is_merged else "Отчёт по серверу"
@@ -405,10 +466,11 @@ def build_server_html(ds, sm, um, sk, linked, emoji_html: str = "", admin_html: 
         card("Доля ответов", pct(ov["reply_share"])),
         card("Пиковый день", str(ov["peak_day"]), f"{ov['peak_messages']} сообщ."),
     ]) + "</div>")
+    b.append(_key_findings(ds, sm, um, sk))
 
     # Динамика
     tr = sm["trend"]
-    b.append(h2("Динамика активности", tr["rel"]))
+    b.append(h2("Динамика активности", tr["rel"], open=True))
     b.append(img(C.chart_timeline(sm["series"]), "Сообщения по дням"))
     b.append(img(C.chart_dau(sm["series"]), "DAU"))
     if tr["available"]:
@@ -566,7 +628,7 @@ def build_server_html(ds, sm, um, sk, linked, emoji_html: str = "", admin_html: 
         b.append(admin_html)
     # СЗП
     if len(sk):
-        b.append(h2("СЗП: значимость пользователей", rel))
+        b.append(h2("СЗП: значимость пользователей", rel, open=True))
         b.append(szp_widget_html(sk, um, linked))
         b.append(method_html())
 

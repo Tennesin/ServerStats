@@ -115,6 +115,18 @@ def _load_guild(db, path: Path, gid: int, title: str, s: date, e: date, compare:
         if c not in ts_of or ts >= ts_of[c]:                 # показываем аккаунт, писавший позже
             ts_of[c], names[c], unames[c], avatars[c] = ts, disp or str(c), uname, av
 
+    # Имена тех, кого нет в таблице users (их только тегали или им отвечали): берём из снимка участников
+    if _has_table(db, "member_roles"):
+        for r in _q(db, "SELECT uid, display_name, username, is_bot FROM member_roles WHERE guild_id=?",
+                    (gid,)).itertuples():
+            u = int(r.uid)
+            if r.is_bot or u in ident.ignored:
+                continue
+            c = ident.canon(u)
+            if c not in names or names[c] == str(c):
+                names[c] = r.display_name or r.username or str(c)
+                unames[c] = r.username or unames.get(c, "")
+
     def person(raw: int) -> str:
         v = info.get(raw)
         return (v[0] if v and v[0] else None) or names.get(ident.canon(raw)) or str(ident.canon(raw))
@@ -308,8 +320,20 @@ def _load_guild(db, path: Path, gid: int, title: str, s: date, e: date, compare:
     # ---- таблица пользователей ----
     all_ids = set(counts.index) | set(prev["uid"].unique()) | set(address_pairs["src"].astype(int)) \
         | set(address_pairs["dst"].astype(int))
+    def shown_name(c: int) -> str:
+        nm = names.get(c)
+        return nm if nm and nm != str(c) else f"Неизвестный ({c})"
+
+    unresolved = [c for c in all_ids if not names.get(c) or names.get(c) == str(c)]
+    if unresolved:
+        text = (f"Не удалось определить ник у {len(unresolved)} чел. (их нет в таблице users и среди "
+                "участников сервера; скорее всего, они уже ушли): показаны как «Неизвестный (ID)». "
+                "Чтобы имена сохранялись, обновите бота и выполните -sync.")
+        notes.append(text)
+        print("  ! " + text)
+
     users = pd.DataFrame(
-        [(str(c), names.get(c) or str(c), unames.get(c, ""), int(counts.get(c, 0)), int(replies.get(c, 0)),
+        [(str(c), shown_name(c), unames.get(c, ""), int(counts.get(c, 0)), int(replies.get(c, 0)),
           roles_of.get(str(c), ""), avatars.get(c, "")) for c in sorted(all_ids)], columns=USER_COLS)
 
     # ---- присутствие, роли, боты ----
