@@ -58,7 +58,7 @@ def audit_work(ds: Dataset, idx):
 
 def compute_szp(ds: Dataset, um: pd.DataFrame,
                 top_n: int = S.SELECT_TOP_N, min_szp: float = S.SELECT_MIN_SZP) -> pd.DataFrame:
-    """Возвращает таблицу с индексом uid (как у user_metrics), отсортированную по СЗП."""
+    """Этап 3: СЗП (степень значимости пользователя для сервера)."""
     if um.empty:
         return pd.DataFrame()
     idx = um.index
@@ -134,27 +134,6 @@ def compute_szp(ds: Dataset, um: pd.DataFrame,
     # если компонента нет (старый формат файла, короткое окно), его вес перераспределяется на остальные
     szp = (comps.fillna(0.0) * w).sum(axis=1) / (avail * w).sum(axis=1) * 100
 
-    # Риск потери
-    days_n = Y
-    ad = um["active_days"].clip(lower=1)
-    expected_gap = (days_n / ad).clip(lower=1.0)
-    recency = ((um["days_since_last"] / expected_gap - 1.0) / S.RISK_RECENCY_GAPS).clip(0.0, 1.0)
-
-    ratio = um["trend_ratio"]
-    decline = ((1.0 - ratio) / S.RISK_DECLINE_RANGE).clip(0.0, 1.0)
-    is_new = ratio.isna() & ~um["trend"].astype(str).str.startswith("н/д")
-    decline = decline.mask(is_new, 0.0)       # «новый в окне» — не падение
-
-    streak = pd.Series(
-        np.where(um["current_streak"] > 0, 0.0,
-                 np.minimum(1.0, um["longest_streak"] / S.RISK_STREAK_DAYS)),
-        index=idx)
-
-    rc = pd.DataFrame({"recency": recency, "decline": decline, "streak": streak}, index=idx)
-    rw = pd.Series(S.RISK_WEIGHTS)[list(rc.columns)]
-    ravail = rc.notna()
-    risk = (rc.fillna(0.0) * rw).sum(axis=1) / (ravail * rw).sum(axis=1) * 100
-
     out = comps.copy()
     out["szp"] = szp
     out["szp_partial"] = (~avail.all(axis=1)) | audit_missing
@@ -171,11 +150,6 @@ def compute_szp(ds: Dataset, um: pd.DataFrame,
     out["g_audit"] = nan if audit_missing else aud_w
     out["b_present"] = present
     out["b_sig"] = n_sig
-    out["risk"] = risk
-    out["risk_level"] = risk.map(lambda v: _label(v, S.RISK_LEVELS))
-    out["risk_recency"] = recency
-    out["risk_decline"] = decline
-    out["risk_streak"] = streak
 
     out = out.sort_values("szp", ascending=False, kind="stable")
     order = out["szp"].rank(method="first", ascending=False)

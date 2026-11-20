@@ -115,6 +115,55 @@ CREATE TABLE IF NOT EXISTS sync_runs (
     reactions_mode TEXT,
     messages_read  INTEGER
 );
+
+-- Снимки «живых» данных сервера: пишутся при -sync и -stats, читаются анализатором.
+-- Правила игнора и слияния аккаунтов здесь не применяются (они применяются при чтении).
+CREATE TABLE IF NOT EXISTS staff_snapshot (
+    guild_id     INTEGER NOT NULL,
+    uid          INTEGER NOT NULL,
+    display_name TEXT,
+    username     TEXT,
+    kind         TEXT NOT NULL,                -- owner / admin
+    roles        TEXT NOT NULL DEFAULT '[]',   -- JSON-список ролей из ADMIN_ROLES
+    PRIMARY KEY (guild_id, uid)
+);
+
+CREATE TABLE IF NOT EXISTS presence (
+    guild_id      INTEGER NOT NULL,
+    uid           INTEGER NOT NULL,
+    present       INTEGER NOT NULL DEFAULT 1,   -- 1 на сервере, 0 ушёл
+    joined_ts     INTEGER,                      -- вступление по данным Discord (может быть NULL)
+    first_seen_ts INTEGER NOT NULL,             -- когда бот впервые увидел человека на сервере
+    last_seen_ts  INTEGER NOT NULL,
+    left_ts       INTEGER,                      -- когда бот заметил, что человека нет (приблизительно)
+    PRIMARY KEY (guild_id, uid)
+);
+
+CREATE TABLE IF NOT EXISTS member_roles (
+    guild_id     INTEGER NOT NULL,
+    uid          INTEGER NOT NULL,
+    display_name TEXT,
+    username     TEXT,
+    is_bot       INTEGER NOT NULL DEFAULT 0,
+    top_pos      INTEGER NOT NULL DEFAULT -1,   -- позиция высшей роли
+    roles        TEXT NOT NULL DEFAULT '[]',    -- JSON-список названий от высшей к низшей
+    PRIMARY KEY (guild_id, uid)
+);
+
+CREATE TABLE IF NOT EXISTS role_snapshot (
+    guild_id    INTEGER NOT NULL,
+    role_id     INTEGER NOT NULL,
+    name        TEXT NOT NULL,
+    color       INTEGER NOT NULL DEFAULT 0,
+    position    INTEGER NOT NULL DEFAULT 0,
+    hoist       INTEGER NOT NULL DEFAULT 0,
+    mentionable INTEGER NOT NULL DEFAULT 0,
+    managed     INTEGER NOT NULL DEFAULT 0,
+    perms       TEXT NOT NULL DEFAULT '',       -- имена включённых прав через запятую
+    members     INTEGER NOT NULL DEFAULT 0,     -- участников с ролью (вместе с ботами)
+    is_default  INTEGER NOT NULL DEFAULT 0,     -- 1 для @everyone
+    PRIMARY KEY (guild_id, role_id)
+);
 """
 
 _con = None

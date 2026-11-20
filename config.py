@@ -335,6 +335,17 @@ def today_local() -> date:
     """Сегодняшняя дата по часовому поясу TIMEZONE (а не по часам компьютера)."""
     return datetime.now(TZ).date()
 
+def guild_start_date_by_id(guild_id: Optional[int]) -> date:
+    """Первый день осмысленной истории сервера, без объекта Discord."""
+    override = GUILD_START_DATES.get(guild_id)
+    if override:
+        return override
+    if guild_id:
+        created_ms = (int(guild_id) >> 22) + 1420070400000      # эпоха Discord
+        created = datetime.fromtimestamp(created_ms / 1000, tz=timezone.utc).astimezone(TZ).date()
+        return max(MIN_START_DATE, created)
+    return MIN_START_DATE
+
 def shift_months(d: date, months: int) -> date:
     y, m0 = divmod(d.year * 12 + d.month - 1 + months, 12)
     m = m0 + 1

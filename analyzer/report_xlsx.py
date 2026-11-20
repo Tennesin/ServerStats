@@ -59,7 +59,6 @@ USER_COLUMNS = [
     ("V объём", "V", "dec"), ("C постоянство", "C", "dec"), ("O отклик", "O", "dec"),
     ("G управление", "G", "dec"), ("B охват", "B", "dec"),
     ("Обращений к нему", "appeals_in", "int"), ("Действий аудита (взвеш.)", "g_audit", "dec1"),
-    ("Риск потери", "risk_shown", "dec1"), ("Уровень риска", "risk_level_shown", "text"),
     ("Роль", "role", "text"),
     ("Эмодзи всего", "emoji_uses", "int"), ("Эмодзи на сообщение", "emoji_per_msg", "dec"),
     ("Сообщений «только эмодзи»", "emoji_only_msgs", "int"),
@@ -83,9 +82,6 @@ METHOD_LINES = [
     f"B охват ({S.SZP_WEIGHTS['B']:.0%}): значимых каналов (≥{S.SZP_SIG_CHANNEL:.0%} сообщений сервера), где ≥{S.SZP_B_MIN_MSGS} сообщений, ÷ число значимых каналов.",
     "В суммарном файле дни считаются от самой ранней даты начала серверов, роль берётся лучшая, действия аудита суммируются.",
     "Динамика в СЗП отдельно не входит. Если компонент недоступен (старый формат, молодой сервер, нет журнала аудита), его вес перераспределяется.",
-    "",
-    f"Риск потери (справочно, только для выбранных): {S.RISK_WEIGHTS['recency']:.0%} давность молчания, "
-    f"{S.RISK_WEIGHTS['decline']:.0%} снижение темпа, {S.RISK_WEIGHTS['streak']:.0%} прерванная серия.",
     "",
     "Веса и пороги заданы экспертно и сверены только с ручной оценкой на малых серверах.",
     "СЗП сравнивает людей внутри одного сервера за период; это не оценка человека и не основание для санкций.",
@@ -146,8 +142,6 @@ def build_summary_xlsx(items: list, path):
             continue
         df = um.join(sk).sort_values("szp", ascending=False, kind="stable")
         df["__uid"] = df.index.astype(str)
-        df["risk_shown"] = df["risk"].where(df["selected"])
-        df["risk_level_shown"] = df["risk_level"].where(df["selected"], "")
         ws = wb.add_worksheet(_sheet_name(f"Польз. {ds.title}", used))
         for c, (h, _k, _f) in enumerate(USER_COLUMNS):
             ws.write_string(0, c, h, F["head"])

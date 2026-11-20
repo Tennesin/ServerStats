@@ -187,7 +187,7 @@ def method_html() -> str:
     def p(k):
         return f"{W[k] * 100:.0f}%"
 
-    return f"""<details><summary>Как считаются СЗП и риск потери</summary><div class="box">
+    return f"""<details><summary>Как считается СЗП</summary><div class="box">
 <p><b>СЗП</b> — степень значимости пользователя для сервера, число от 0 до 100: насколько изменится жизнь сервера, если этот человек пропадёт. Сумма пяти компонентов (каждый от 0 до 1) с весами.</p>
 <ul>
 <li><b>V, объём ({p('V')})</b>: √(доля человека в сообщениях сервера ÷ доля лидера). Лидер сервера получает 1.</li>
@@ -197,8 +197,6 @@ def method_html() -> str:
 <li><b>B, охват ({p('B')})</b>: доля значимых каналов (не менее {S.SZP_SIG_CHANNEL * 100:.0f}% сообщений сервера), где у человека не меньше {S.SZP_B_MIN_MSGS} сообщений.</li>
 </ul>
 <p>Динамика в СЗП отдельно не входит (кроме присутствия в последние дни внутри C). Если часть данных недоступна (старый формат файла, молодой сервер, нет журнала аудита), вес недостающих компонентов перераспределяется на остальные. В суммарном файле дни считаются от самой ранней даты начала серверов, роль берётся лучшая по серверам, действия аудита суммируются.</p>
-<p><b>Риск потери</b> (справочная шкала 0–100): {S.RISK_WEIGHTS['recency'] * 100:.0f}% — давность молчания относительно обычного промежутка между активными днями человека,
-{S.RISK_WEIGHTS['decline'] * 100:.0f}% — снижение темпа во второй половине окна, {S.RISK_WEIGHTS['streak'] * 100:.0f}% — прерванная серия активных дней. Показывается только для выбранных пользователей.</p>
 <p class="muted">Веса и пороги заданы экспертно и сверены только с ручной оценкой на малых серверах. Реакции собраны в режиме «счётчики», в них входят реакции ботов и самореакции. Журнал аудита Discord хранит около {S.AUDIT_RETENTION_DAYS} дней. СЗП сравнивает людей внутри одного сервера за выбранный период; это не оценка человека и не основание для санкций. При короткой истории все выводы ориентировочные.</p>
 </div></details>"""
 
@@ -244,7 +242,6 @@ def _szp_data(sk, um, linked) -> list:
         if not (sel or uid in top_on or uid in top_off):
             continue
         r = um.loc[uid]
-        risk = "—" if (not sel or _bad(s["risk"])) else f"{s['risk']:.0f} ({s['risk_level']})"
         out.append({
             "id": str(uid), "name": str(r["name"]),
             "href": ("users/" + quote(linked[uid])) if uid in linked else "",
@@ -253,7 +250,7 @@ def _szp_data(sk, um, linked) -> list:
             "pts": [round(float(x), 3) for x in pts[pos]],
             "rk": [int(s["szp_rank"]), int(rank_off[uid])],
             "msgs": int(r["messages"]), "days": int(r["active_days"]),
-            "risk": risk, "rel": str(r["reliability"]), "role": str(r["role"] or ""),
+            "rel": str(r["reliability"]), "role": str(r["role"] or ""),
             "low": r["reliability"] == "низкая",
         })
     return out
@@ -322,7 +319,6 @@ function render(){
     td(lvl(x.v));
     td(String(x.d.msgs),true);
     td(String(x.d.days),true);
-    td(x.d.risk);
     td(x.d.rel);
     td(x.d.role);
     tbody.appendChild(tr);
@@ -348,7 +344,7 @@ def szp_widget_html(sk, um, linked) -> str:
     head = "".join(
         f'<th class="n">{esc(h)}</th>' if i in (0, 2, 4, 5) else f"<th>{esc(h)}</th>"
         for i, h in enumerate(["№", "Пользователь", "СЗП", "Уровень", "Сообщений", "Дней",
-                               "Риск потери", "Достоверность", "Роль"]))
+                               "Достоверность", "Роль"]))
     js = _SZP_JS.replace("__DATA__", dump(_szp_data(sk, um, linked))).replace("__CFG__", dump(cfg))
     return (
         _SZP_STYLE
@@ -715,20 +711,6 @@ def build_user_html(ds, uid, um, sk, days, avatar=None, emoji_html: str = "") ->
     if s["szp_partial"]:
         b.append('<p class="muted">Часть компонентов недоступна, поэтому их вес перераспределён: '
                  "сумма баллов в таблице может не совпадать с итоговым СЗП.</p>")
-
-    # Риск потери
-    if s["selected"]:
-        b.append(h2("Риск потери (справочно)"))
-        b.append(f"<p>Риск: <b>{s['risk']:.0f}</b> из 100 ({esc(s['risk_level'])}). "
-                 "Это не прогноз ухода человека, а сигнал присмотреться: он учитывает только "
-                 "молчание, падение темпа и прерванную серию.</p>")
-        b.append(table(["Составляющая", "Значение (0–1)", "Вес"],
-                       [["Давность молчания", "н/д" if _bad(s["risk_recency"]) else f"{s['risk_recency']:.2f}",
-                         f"{S.RISK_WEIGHTS['recency'] * 100:.0f}%"],
-                        ["Снижение темпа", "н/д" if _bad(s["risk_decline"]) else f"{s['risk_decline']:.2f}",
-                         f"{S.RISK_WEIGHTS['decline'] * 100:.0f}%"],
-                        ["Прерванная серия", "н/д" if _bad(s["risk_streak"]) else f"{s['risk_streak']:.2f}",
-                         f"{S.RISK_WEIGHTS['streak'] * 100:.0f}%"]], num_cols=(1, 2)))
 
     # Графики
     b.append(h2("Активность"))

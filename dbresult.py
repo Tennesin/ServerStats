@@ -1,6 +1,5 @@
 """Сборка ScanResult из базы с применением игнора, слияния, антиспама и исключённых каналов.
 Работает в отдельном потоке: с Discord не связан, использует только ID и простые значения."""
-
 from dataclasses import replace
 from datetime import date, datetime, timedelta
 from itertools import groupby
@@ -8,7 +7,8 @@ from types import SimpleNamespace
 
 from config import AUDIT_ENABLED, AUDIT_RETENTION_DAYS, AUDIT_SKIP_ACTIONS, TZ
 from db import get_meta, new_connection
-from scanner import AdminEvent, ScanResult, ScanState, _reaction_finish, is_spam_dh
+from rules import is_spam_dh
+from scanner import AdminEvent, ScanResult, ScanState, _reaction_finish
 
 def build_result(gid: int, params, state: ScanState, rules, ident, spam_rules) -> ScanResult:
     db = new_connection()
