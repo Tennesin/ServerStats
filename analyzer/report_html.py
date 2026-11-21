@@ -446,7 +446,7 @@ def build_server_html(ds, sm, um, sk, linked, emoji_html: str = "", admin_html: 
     b.append(f'<div class="box">{box}</div>')
     if ds.warnings:
         b.append(f'<div class="box warn"><b>Предупреждения при чтении файла</b>{ul(ds.warnings)}</div>')
-    if ds.notes:
+    if ds.notes and ds.is_merged:
         b.append(f'<div class="box"><b>Примечания бота</b>{ul(ds.notes)}</div>')
     if ds.excluded:
         b.append(f'<div class="box muted">Из анализа исключено чатов по правилам бота: {len(ds.excluded)}. '
