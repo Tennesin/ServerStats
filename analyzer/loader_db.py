@@ -324,13 +324,12 @@ def _load_guild(db, path: Path, gid: int, title: str, s: date, e: date, compare:
         nm = names.get(c)
         return nm if nm and nm != str(c) else f"Неизвестный ({c})"
 
-    unresolved = [c for c in all_ids if not names.get(c) or names.get(c) == str(c)]
-    if unresolved:
-        text = (f"Не удалось определить ник у {len(unresolved)} чел. (их нет в таблице users и среди "
-                "участников сервера; скорее всего, они уже ушли): показаны как «Неизвестный (ID)». "
-                "Чтобы имена сохранялись, обновите бота и выполните -sync.")
-        notes.append(text)
-        print("  ! " + text)
+    nameless = [c for c in all_ids if not names.get(c) or names.get(c) == str(c)]
+    if nameless:
+        notes.append(f"Не удалось определить ник у {len(nameless)} чел. (скорее всего, они ушли с сервера): "
+                     "показаны как «Неизвестный (ID)».")
+        print(f"  ! Не удалось определить ник у {len(nameless)} чел. ID: "
+              + ", ".join(map(str, sorted(nameless))))
 
     users = pd.DataFrame(
         [(str(c), shown_name(c), unames.get(c, ""), int(counts.get(c, 0)), int(replies.get(c, 0)),
