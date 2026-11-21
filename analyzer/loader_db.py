@@ -132,10 +132,11 @@ def _load_guild(db, path: Path, gid: int, title: str, s: date, e: date, compare:
         return (v[0] if v and v[0] else None) or names.get(ident.canon(raw)) or str(ident.canon(raw))
 
     # ---- сообщения ----
-    msg = _q(db, "SELECT message_id, author_id, channel_id, day, hour, weekday, is_reply, reply_to, "
+    msg = _q(db, "SELECT message_id, author_id, channel_id, day, hour, weekday, is_reply, "
+                 "COALESCE(reply_to, 0) AS reply_to, "
                  "reply_state, has_text FROM messages WHERE guild_id=? AND day BETWEEN ? AND ?",
              (gid, lo, hi))
-    msg["reply_to"] = msg["reply_to"].fillna(0).astype("int64")
+    msg["reply_to"] = msg["reply_to"].astype("int64")
     msg = msg[~msg["channel_id"].isin(excl) & ~msg["author_id"].isin(ign)].copy()
     msg["uid"] = _canon(msg["author_id"], ident)
     cur, prev = msg[msg["day"] >= mid], msg[msg["day"] < mid]
@@ -181,10 +182,11 @@ def _load_guild(db, path: Path, gid: int, title: str, s: date, e: date, compare:
         reply_pairs[["src", "dst"]] = reply_pairs[["src", "dst"]].astype(str)
 
     # ---- теги ----
-    mq = _q(db, "SELECT m.author_id, m.channel_id, m.reply_to, t.target_id FROM mentions t "
+    mq = _q(db, "SELECT m.author_id, m.channel_id, COALESCE(m.reply_to, 0) AS reply_to, t.target_id "
+                "FROM mentions t "
                 "JOIN messages m ON m.message_id = t.message_id "
                 "WHERE m.guild_id=? AND m.day >= ? AND m.day <= ?", (gid, mid, hi))
-    mq["reply_to"] = mq["reply_to"].fillna(0).astype("int64")
+    mq["reply_to"] = mq["reply_to"].astype("int64")
     mq = mq[~mq["channel_id"].isin(excl) & ~mq["author_id"].isin(ign)
             & ~mq["target_id"].isin(ign) & ~mq["target_id"].isin(bots)].copy()
     mq["uid"], mq["t"] = _canon(mq["author_id"], ident), _canon(mq["target_id"], ident)

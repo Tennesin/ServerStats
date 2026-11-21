@@ -132,7 +132,7 @@ def build_user_status_html(ds, uid, um) -> str:
 
     if not cards and not chips:
         return ""
-    out = [STYLE, h2("Присутствие и роли")]
+    out = [STYLE, h2("Присутствие и роли", open=True)]
     if cards:
         out.append('<div class="cards">' + "".join(cards) + "</div>")
     if state is False:
