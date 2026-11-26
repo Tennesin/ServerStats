@@ -355,6 +355,16 @@ async def run_clear_task(bot: discord.Client, params):
     finally:
         _cli["busy"] = False
 
+async def run_avatar_task(bot: discord.Client, guild_id: int, query, include_bots: bool):
+    """Выгрузка аватарок в фоне (чтобы консоль принимала -cancel). busy уже выставлен вызывающим."""
+    _cli["cancel"] = False
+    try:
+        await run_avatar(bot, guild_id, query, include_bots, lambda: _cli["cancel"])
+    except Exception:
+        log.exception("Выгрузка аватарок завершилась ошибкой")
+    finally:
+        _cli["busy"] = False
+
 async def handle_console_line(bot: discord.Client, line: str):
     if line.split(None, 1)[0].lower() == "-say":
         await say(bot, line)
@@ -404,6 +414,19 @@ async def handle_console_line(bot: discord.Client, line: str):
             return
         _cli["busy"] = True
         task = asyncio.create_task(run_clear_task(bot, params))
+        background_tasks.add(task)
+        task.add_done_callback(background_tasks.discard)
+    elif cmd == "-avatar":
+        if _cli["busy"]:
+            print("Пакетная операция уже идёт. Дождитесь окончания или введите -cancel.", flush=True)
+            return
+        try:
+            guild_id, query, include_bots = parse_avatar(args)
+        except ValueError as e:
+            print(f"Ошибка: {e}", flush=True)
+            return
+        _cli["busy"] = True
+        task = asyncio.create_task(run_avatar_task(bot, guild_id, query, include_bots))
         background_tasks.add(task)
         task.add_done_callback(background_tasks.discard)
     elif cmd == "-sync":
