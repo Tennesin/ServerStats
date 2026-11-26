@@ -9,7 +9,6 @@ import discord
 from PIL import Image, ImageChops, ImageDraw
 
 from config import STATS_DIR, fmt_duration, fmt_num, log, safe_filename
-from avatar_export import USAGE as AVATAR_USAGE, parse_avatar, run_avatar
 
 AVATAR_SIZE = 512          # итоговая сторона картинки, px
 MASK_SS = 4                # во сколько раз крупнее рисуется маска круга (сглаживание краёв)

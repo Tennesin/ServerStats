@@ -1,5 +1,4 @@
 """Снимок «живых» данных сервера (администрация, роли, присутствие) в базу."""
-
 import json
 import time
 from collections import defaultdict

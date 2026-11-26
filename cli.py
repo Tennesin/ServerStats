@@ -23,6 +23,7 @@ from scanner import (
     guild_start_date, params_for_guild, sync_only,
 )
 from cleaner import USAGE as CLEAR_USAGE, parse_clear, run_clear
+from avatar_export import USAGE as AVATAR_USAGE, parse_avatar, run_avatar
 
 VALUE_OPTS = {"period", "last", "start", "end", "exclude", "detail", "sort", "reactions"}
 FLAG_OPTS = {"compare", "nosync", "live"}
